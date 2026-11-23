@@ -1767,7 +1767,7 @@
       var prev = st.hunt;
       if (!prev || prev.boss !== live.boss || prev.cur !== (live.cur || 0)
         || prev.need !== live.need || (prev.tier || '') !== (live.tier || '')) {
-        st.hunt = { tier: live.tier || '', boss: live.boss, cur: live.cur || 0, need: live.need, ts: Date.now() };
+        st.hunt = { tier: live.tier || '', boss: live.boss, cur: live.cur || 0, need: live.need, ts: Date.now(), watch: null };
         saveTasks();
       }
     }
@@ -1777,6 +1777,11 @@
       if (HUNT.on) {
         var liveCur = huntLiveCur();
         if (liveCur != null && liveCur > hcur) { hcur = liveCur; hest = true; }
+        if (liveCur != null) { st.hunt.cur = Math.min(liveCur, st.hunt.need); st.hunt.ts = Date.now(); st.hunt.watch = null; saveTasks(); }
+      } else if (!WILD.on) {
+        // 静默监控：没点「狩猎任务」也按统计窗口里的击杀增量往下记
+        var wcur = watchLiveCur(st);
+        if (wcur != null && wcur > hcur) hcur = wcur;
       }
       rows.push({
         name: (st.hunt.tier ? st.hunt.tier + '狩猎 · ' : '狩猎 · ') + st.hunt.boss,
@@ -2279,6 +2284,50 @@
     if (kc < pb.cnt) { pb.extra += pb.cnt; pb.cnt = 0; }   // 统计被重置过，把差值累积起来
     var d = pb.extra + (kc - pb.cnt);
     return d > 0 ? info.cur + d : info.cur;
+  }
+
+  // 静默监控：狩猎没开时，用统计窗口里「任务怪击杀数」的增量推进已记录的进度。
+  // 统计窗口没开、或刚重置过，只重新绑定基线，不追溯计数，避免把历史击杀算进来。
+  function watchLiveCur(st) {
+    var h = st && st.hunt;
+    if (!h || !h.need || !h.boss) return null;
+    var kc = statKillsOf(h.boss);
+    if (kc == null) return null;
+    var w = h.watch;
+    if (!w || w.boss !== h.boss) {
+      h.watch = { boss: h.boss, cnt: kc };
+      saveTasks();
+      return h.cur || 0;
+    }
+    if (kc < w.cnt) {                       // 统计被「重置」过，基线跟着归零
+      w.cnt = kc;
+      saveTasks();
+      return h.cur || 0;
+    }
+    var d = kc - w.cnt;
+    if (d > 0) {
+      h.cur = Math.min(h.need, (h.cur || 0) + d);
+      h.ts = Date.now();
+      w.cnt = kc;
+      saveTasks();
+    }
+    return h.cur || 0;
+  }
+
+  // 统计窗口不在就静默打开它（每分钟最多试一次，不弹提示、不打断操作）
+  var SILENT_OPEN_GAP = 60000;
+  var silentOpenAt = 0;
+  function silentWatchTasks() {
+    var st = tasksOfChar();
+    var h = st && st.hunt;
+    if (!h || !h.need || !h.boss) return;
+    if (HUNT.on || WILD.on) return;         // 自动流程自己会记，别重复
+    var w = qSel('.window-statistics');
+    if (w && !w.classList.contains('closed')) return;
+    if (Date.now() - silentOpenAt < SILENT_OPEN_GAP) return;
+    silentOpenAt = Date.now();
+    var doc = getGameDoc();
+    if (doc) ensureStatWindow(doc);
   }
 
   async function ensureStatWindow(doc) {
@@ -4605,7 +4654,10 @@
   (function initTaskBar() {
     if (!$('taskbar')) return;
     renderTasks();
-    setInterval(renderTasks, 4000);
+    setInterval(function () {
+      try { silentWatchTasks(); } catch (e) {}
+      renderTasks();
+    }, 4000);
   })();
 
   /* ---------------- 起号进度：查转数 / 重置 ---------------- */
