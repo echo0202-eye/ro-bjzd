@@ -2440,6 +2440,7 @@ function __RO_BOOT__() {
         hp: hpm ? parseFloat(hpm[1]) : null,
         star: /★/.test(raw),
         attacking: b.classList.contains('manual-target') || !!(b.querySelector('em') && /攻击中/.test(b.textContent)),
+        disabled: !!b.disabled,
         x: xy ? +xy[1] : null,
         y: xy ? +xy[2] : null
       };
@@ -2467,12 +2468,15 @@ function __RO_BOOT__() {
       return '已点怪' + (pending ? ' ' + pending.name : '') + '，等开始攻击…';
     }
 
+    var usable = rows.filter(function (r) { return !r.disabled; });
+    if (!usable.length) { WILD.targetKey = ''; return '魔物暂时都不可攻击（等刷新）…'; }
+
     function hpOf(r) { return r.hp == null ? 999 : r.hp; }
     function distOf(r) {
       if (r.x == null || pos.x == null) return 9999;
       return Math.abs(r.x - pos.x) + Math.abs(r.y - pos.y);
     }
-    var pick = rows.slice().sort(function (a, b) {
+    var pick = usable.slice().sort(function (a, b) {
       if (a.star !== b.star) return a.star ? -1 : 1;
       if (hpOf(a) !== hpOf(b)) return hpOf(a) - hpOf(b);
       return distOf(a) - distOf(b);
