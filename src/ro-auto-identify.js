@@ -3182,7 +3182,12 @@
         upsertRecord(res);
         saveRecords();
         render();
-        if (autoSell) await sellRecommended(true);
+        if (autoSell) {
+          var soldN = await sellRecommended(true);
+          if (!soldN && sellCandidates().length) {
+            setStatus('自动卖：判定要卖的装备没卖出去，请在店里切到「出售道具」页');
+          }
+        }
         if (limit && done >= limit) {
           setStatus('已鉴定 ' + done + ' 件（本次上限 ' + limit + ' 件）');
           break;
@@ -3959,7 +3964,7 @@
     var ok = true;
     try {
       ok = window.confirm('将按名称卖出 ' + names.length + ' 种装备：' + names.join('、')
-        + '\n\n注意：同名装备会整名出售，同名的 A/S 级件也会一起卖掉。确定继续？');
+        + '\n\n注意：同名装备会整名出售，同名的达标件也会一起卖掉。确定继续？');
     } catch (e) {}
     if (!ok) { setStatus('已取消卖出'); return 0; }
     setStatus('批量卖出选中：' + names.length + ' 种装备');
@@ -4385,10 +4390,10 @@
     '.dec button.on.sell{background:#a3524a;border-color:#8e453e}',
     '.dec button.on.pending{background:#8a8272;border-color:#7a7364}',
     '.empty{padding:18px;text-align:center;color:#a79e8b}',
-    '.wrap.min .dragbar,.wrap.min .targetbar,.wrap.min .casbar,.wrap.min .status,.wrap.min .taskbar,.wrap.min .acts,.wrap.min .tools,.wrap.min .acct,.wrap.min .list{display:none}',
+    '.wrap.min .dragbar,.wrap.min .targetbar,.wrap.min .casbar,.wrap.min .status,.wrap.min .taskbar,.wrap.min .acts,.wrap.min .tools,.wrap.min .acct,.wrap.min .list{display:none!important}',
     '.wrap.min .hd{height:22px;padding:1px 6px;gap:5px}',
-    '.wrap.min .hd .grip,.wrap.min .hd .badge,.wrap.min .hd button{display:none}',
-    '.wrap.min .hd #min{display:inline-block}',
+    '.wrap.min .hd .grip,.wrap.min .hd .badge,.wrap.min .hd button{display:none!important}',
+    '.wrap.min .hd #min{display:inline-block!important}',
     '.acts #keepratio{width:44px;font:inherit;padding:1px 3px;border:1px solid #d4ccb8;border-radius:4px;background:#fff;color:#3a3a3a}',
     '#mailgo-mini{display:none;background:#4f7a45;border-color:#446b3b;color:#fff}',
     '.targetbar,.casbar{display:flex;align-items:center;gap:6px;padding:5px 9px;background:#fffdf8;border-bottom:1px solid #efe9db;font-size:11px;color:#6f6656}',
