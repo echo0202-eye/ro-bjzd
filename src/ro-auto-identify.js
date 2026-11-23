@@ -2229,10 +2229,18 @@
   var WILD_STAND = { x: 148, y: 166 };  // 站这里能点到「野外boss传送」
   var WILD_COST = 200000;               // 每次传送费用
   var WILD_STEP = 5;                    // 每杀一只按 -5% 活力
-  var WILD_STOP = 35;                   // 低于 35% 有重罚，到 35% 就收手
-  var WILD_KILLS = Math.round((100 - WILD_STOP) / WILD_STEP);   // 约 13 只
+  var WILD_STOP = 35;                   // 低于 30% 有重罚，到 35% 就停手回城
+  var WILD_RESUME = 95;                 // 城内坐下恢复到 95% 再进下一轮
+  var WILD_RECOVER = 7;                 // 城内坐下每分钟恢复 7%
   var WILD_KEY = 'ro-auto-identify-wild-v1';
-  var WILD = { on: false, map: '', base: 0, key: '', done: false, doneReason: '', round: 0, total: 0, startedAt: 0, statAt: 0, repairAt: 0, wornAt: 0, stoppedMsg: '' };
+  var WILD = {
+    on: false, map: '', key: '', done: false, doneReason: '',
+    round: 0, total: 0, roundKills: 0,
+    vigor: 100, vigorAt: 0, resting: false,
+    killsSeen: null, roundAt: 0,
+    mobAt: 0, targetKey: '',
+    startedAt: 0, statAt: 0, repairAt: 0, wornAt: 0, stoppedMsg: ''
+  };
 
   try { WILD.key = localStorage.getItem(WILD_KEY) || ''; } catch (e) {}
 
@@ -2373,22 +2381,115 @@
     if (b) b.textContent = on ? '停野外' : '野外BOSS';
   }
 
-  function updateWildBar(kills) {
+  // 活力估算：野图里站着不恢复，只是每杀一只 -5%；回城坐下每分钟 +7%（封顶 100）
+  function wildVigorNow() {
+    var v = (WILD.vigor == null) ? 100 : WILD.vigor;
+    if (WILD.resting && WILD.vigorAt) v += WILD_RECOVER * (Date.now() - WILD.vigorAt) / 60000;
+    return Math.max(0, Math.min(100, v));
+  }
+
+  // 城里的「坐下 / 站起」按钮（比模拟 Insert 键可靠）
+  function wildPostureBtn() {
+    var b = qAll('button.map-posture-toggle').filter(visible)[0];
+    if (b) return b;
+    return qAll('.minimap-wrap button, .map-zoom-controls button').filter(function (x) {
+      return /^(坐下|站起)$/.test((x.textContent || '').trim());
+    })[0] || null;
+  }
+
+  function updateWildBar() {
     var bar = $('wildbar');
     if (!bar) return;
     bar.style.display = 'flex';
     var b = $('wild-info');
     if (!b) return;
-    var round = '第 ' + Math.max(1, (WILD.round || 0) + 1) + ' 轮';
-    var total = ' · 累计 ' + (WILD.total || 0);
-    if (kills == null) { b.textContent = round + ' · 活力 —（统计窗口没打开）' + total; return; }
-    var vigor = Math.max(0, 100 - WILD_STEP * kills);
-    b.textContent = round + ' · 活力约 ' + vigor + '% · 本轮 ' + kills + '/' + WILD_KILLS + total;
+    var v = Math.round(wildVigorNow());
+    var txt = '第 ' + Math.max(1, (WILD.round || 0) + 1) + ' 轮 · 活力约 ' + v + '%';
+    if (WILD.resting) {
+      var mins = Math.max(0, Math.ceil((WILD_RESUME - v) / WILD_RECOVER));
+      txt += '（坐下恢复' + (mins > 0 ? '，约 ' + mins + ' 分钟后到 ' + WILD_RESUME + '%' : '') + '）';
+    }
+    b.textContent = txt + ' · 本轮 ' + (WILD.roundKills || 0) + ' 只 · 累计 ' + (WILD.total || 0);
+  }
+
+  // 右侧「魔物」页签：列出视野内的活怪，点一下行就是主动攻击
+  async function openMobTab(doc) {
+    var tab = entityTab(doc, '魔物');
+    if (!tab) return false;
+    if (!tab.classList.contains('active')) { tab.click(); await sleep(500); }
+    return true;
+  }
+
+  function mobRows() {
+    var sb = qSel('.map-entity-sidebar');
+    if (!sb) return [];
+    var list = sb.querySelector('.entity-list.entity-group-content') || sb.querySelector('.entity-list');
+    if (!list) return [];
+    return Array.prototype.slice.call(list.querySelectorAll('button')).map(function (b) {
+      var nm = b.querySelector('b');
+      var raw = b.textContent.replace(/\s+/g, ' ');
+      var idm = raw.match(/#(\d+)/);
+      var hpm = raw.match(/HP\s*(\d+(?:\.\d+)?)\s*%/i);
+      var xy = raw.match(/(-?\d+)\s*,\s*(-?\d+)\s*$/);
+      return {
+        el: b,
+        name: (nm ? nm.textContent : b.textContent).replace(/^★\s*/, '').trim(),
+        mobId: idm ? +idm[1] : 0,
+        hp: hpm ? parseFloat(hpm[1]) : null,
+        star: /★/.test(raw),
+        attacking: b.classList.contains('manual-target') || !!(b.querySelector('em') && /攻击中/.test(b.textContent)),
+        x: xy ? +xy[1] : null,
+        y: xy ? +xy[2] : null
+      };
+    }).filter(function (r) { return !!r.name; });
+  }
+
+  function mobKey(r) { return r.name + '#' + r.mobId; }
+
+  var MOB_IDLE_MS = 5000;   // 点了怪 5 秒还没进入「攻击中」，重新点一次
+
+  // 主动攻击：优先 ★(MVP)，其次血最少、离得最近；已经在打就不重复点
+  async function wildAttackOnce(doc, pos) {
+    if (!await openMobTab(doc)) return '找不到右侧「魔物」页签';
+    var rows = mobRows();
+    if (!rows.length) { WILD.targetKey = ''; return '视野里没有魔物，等刷新…'; }
+
+    var cur = rows.filter(function (r) { return r.attacking; })[0];
+    if (cur) {
+      WILD.targetKey = mobKey(cur);
+      WILD.mobAt = Date.now();
+      return '攻击中 · ' + (cur.star ? '★ ' : '') + cur.name + (cur.hp == null ? '' : '（HP ' + Math.round(cur.hp) + '%）');
+    }
+    if (WILD.targetKey && Date.now() - (WILD.mobAt || 0) < MOB_IDLE_MS) {
+      var pending = rows.filter(function (r) { return mobKey(r) === WILD.targetKey; })[0];
+      return '已点怪' + (pending ? ' ' + pending.name : '') + '，等开始攻击…';
+    }
+
+    function hpOf(r) { return r.hp == null ? 999 : r.hp; }
+    function distOf(r) {
+      if (r.x == null || pos.x == null) return 9999;
+      return Math.abs(r.x - pos.x) + Math.abs(r.y - pos.y);
+    }
+    var pick = rows.slice().sort(function (a, b) {
+      if (a.star !== b.star) return a.star ? -1 : 1;
+      if (hpOf(a) !== hpOf(b)) return hpOf(a) - hpOf(b);
+      return distOf(a) - distOf(b);
+    })[0];
+
+    WILD.targetKey = mobKey(pick);
+    WILD.mobAt = Date.now();
+    tapEl(pick.el);
+    return '攻击 ' + (pick.star ? '★ ' : '') + pick.name + (pick.hp == null ? '' : '（HP ' + Math.round(pick.hp) + '%）');
   }
 
   function stopWild(msg) {
     WILD.on = false;
     WILD.map = '';
+    if (WILD.resting) {
+      WILD.resting = false;
+      var sb = wildPostureBtn();
+      if (sb && /站起/.test(sb.textContent)) tapEl(sb);
+    }
     WILD.stoppedMsg = msg || '';
     setWildBtn(false);
     if (msg) setStatus('野外BOSS：' + msg);
@@ -2431,9 +2532,15 @@
       if (np.map && np.map !== pos.map) {
         WILD.map = np.map;
         WILD.done = false;
-        var f = await huntStartFarm(doc);
-        return '传送到 ' + np.map + '（' + label + '）· ' +
-          (f === 'started' || f === 'running' ? '开始挂机' : '挂机没点起来') + tag;
+        WILD.doneReason = '';
+        WILD.resting = false;
+        WILD.roundAt = Date.now();
+        WILD.roundKills = 0;
+        WILD.killsSeen = null;          // 进图后按统计窗口重新绑基线
+        WILD.mobAt = 0;
+        WILD.targetKey = '';
+        updateWildBar();
+        return '已到 ' + np.map + '（' + label + '），开始主动攻击' + tag;
       }
       var dlg = qSel('.npc-dialog-card');
       var txt = dlg ? dlg.textContent.replace(/\s+/g, ' ').slice(0, 120) : '';
@@ -2461,23 +2568,45 @@
       return '角色倒下，已点「返回城镇」复活' + tag;
     }
 
-    // 本轮打完已回城：修装备、重置统计、自动续下一轮（金币不足才收工）
+    // 本轮打完已回城：先坐下恢复活力，回到 95% 再修装备、重置统计并续下一轮
     if (WILD.done && /rag_fes/i.test(pos.map || '')) {
       if (WILD.doneReason === 'timeout') {
-        stopWild('统计窗口不可用，已挂 40 分钟，累计击杀 ' + (WILD.total || 0) + '，收工' + tag);
+        stopWild('统计窗口不可用，本轮挂了 40 分钟，累计击杀 ' + (WILD.total || 0) + '，收工' + tag);
         return '';
       }
+      if (!WILD.resting) {
+        WILD.vigor = wildVigorNow();
+        WILD.vigorAt = Date.now();
+        WILD.resting = true;
+        var pb = wildPostureBtn();
+        if (pb && /坐下/.test(pb.textContent)) { tapEl(pb); await sleep(500); }
+        updateWildBar();
+        return '回城坐下恢复活力（' + Math.round(WILD.vigor) + '% → ' + WILD_RESUME + '%）' + tag;
+      }
+      var vg = wildVigorNow();
+      updateWildBar();
+      if (vg < WILD_RESUME) {
+        var mins = Math.max(1, Math.ceil((WILD_RESUME - vg) / WILD_RECOVER));
+        return '城内坐下恢复中 · 活力约 ' + Math.floor(vg) + '%（还需约 ' + mins + ' 分钟）' + tag;
+      }
+      WILD.vigor = Math.max(vg, WILD_RESUME);
+      WILD.resting = false;
+      var sb = wildPostureBtn();
+      if (sb && /站起/.test(sb.textContent)) { tapEl(sb); await sleep(400); }
       WILD.round = (WILD.round || 0) + 1;
       WILD.done = false;
       WILD.doneReason = '';
       WILD.map = '';
+      WILD.roundKills = 0;
+      WILD.killsSeen = null;
+      WILD.mobAt = 0;
+      WILD.targetKey = '';
       var rp = '';
       if (brokenNames().length) rp = await tryRepair(doc);
       if (await ensureStatWindow(doc)) await resetStats();     // 新一轮从 0 开始计
-      WILD.base = statKills() || 0;
       WILD.statAt = 0;
-      updateWildBar(0);
-      return '第 ' + WILD.round + ' 轮完成（累计击杀 ' + (WILD.total || 0) + '），回城补给完毕，继续下一轮' +
+      updateWildBar();
+      return '活力回到 ' + Math.round(WILD.vigor) + '%，第 ' + WILD.round + ' 轮完成（累计击杀 ' + (WILD.total || 0) + '），继续下一轮' +
         (rp ? '（' + rp + '）' : '') + tag;
     }
 
@@ -2498,38 +2627,41 @@
         WILD.statAt = Date.now();
         if (statKills() == null) await ensureStatWindow(doc);
       }
-      var kn = statKills();
-      var kills = kn == null ? null : Math.max(0, kn - WILD.base);
-      updateWildBar(kills);
 
-      // 到 35%：停挂机、回城，回城后自动续下一轮
-      if (kills != null && kills >= WILD_KILLS) {
-        var fb = farmButton(doc);
-        if (fb && fb.textContent.trim() === '停止挂机') { tapEl(fb); await sleep(900); }
+      // 按统计窗口的击杀增量扣活力（每只 -5%）
+      var kn = statKills();
+      if (kn != null) {
+        if (WILD.killsSeen == null || kn < WILD.killsSeen) WILD.killsSeen = kn;
+        var dk = kn - WILD.killsSeen;
+        if (dk > 0) {
+          WILD.killsSeen = kn;
+          WILD.vigor = Math.max(0, wildVigorNow() - WILD_STEP * dk);
+          WILD.vigorAt = Date.now();
+          WILD.roundKills = (WILD.roundKills || 0) + dk;
+          WILD.total = (WILD.total || 0) + dk;
+        }
+      }
+      updateWildBar();
+
+      // 到 35%：停手回城（只停点怪，不碰挂机开关）
+      var vig = wildVigorNow();
+      if (vig <= WILD_STOP) {
         WILD.map = '';
         WILD.done = true;
-        WILD.doneReason = 'kills';
-        WILD.total = (WILD.total || 0) + kills;
-        updateWildBar(kills);
-        return '达 ' + WILD_STOP + '%（击杀 ' + kills + '，累计 ' + WILD.total + '），停止挂机并回城补给' + tag;
+        WILD.doneReason = 'vigor';
+        WILD.targetKey = '';
+        return '活力降到 ' + Math.round(vig) + '%（本轮 ' + WILD.roundKills + ' 只，累计 ' + WILD.total + '），停手回城' + tag;
       }
-      // 兜底：统计窗口一直不可用时，最多挂 40 分钟就回城
-      if (kills == null && Date.now() - (WILD.startedAt || 0) > 40 * 60 * 1000) {
-        var fb0 = farmButton(doc);
-        if (fb0 && fb0.textContent.trim() === '停止挂机') { tapEl(fb0); await sleep(900); }
+      // 兜底：统计窗口一直不可用时，本轮最多打 40 分钟
+      if (kn == null && Date.now() - (WILD.roundAt || WILD.startedAt || 0) > 40 * 60 * 1000) {
         WILD.map = '';
         WILD.done = true;
         WILD.doneReason = 'timeout';
-        return '统计窗口不可用，已挂 40 分钟，停止挂机并回城' + tag;
+        WILD.targetKey = '';
+        return '统计窗口不可用，本轮已打 40 分钟，停手回城' + tag;
       }
 
-      var f = await huntStartFarm(doc);
-      if (f === 'started' || f === 'running') {
-        return '第 ' + Math.max(1, (WILD.round || 0) + 1) + ' 轮挂机中 · 活力约 ' +
-          (kills == null ? '—' : (100 - WILD_STEP * kills) + '%') +
-          '（本轮 ' + (kills == null ? '?' : kills) + '/' + WILD_KILLS + '，累计 ' + (WILD.total || 0) + '）' + tag;
-      }
-      return (f === 'nofarm' ? '没找到顶栏「开始挂机」按钮' : '点了「开始挂机」但没生效（挂机额度可能用完）') + tag;
+      return await wildAttackOnce(doc, pos) + tag;
     }
 
     // 已离开野图（被打回城 / 掉线）：清掉目标图，重新准备
@@ -2575,17 +2707,24 @@
     WILD.map = '';
     WILD.round = 0;
     WILD.total = 0;
+    WILD.roundKills = 0;
+    WILD.vigor = 100;
+    WILD.vigorAt = 0;
+    WILD.resting = false;
+    WILD.killsSeen = null;
+    WILD.roundAt = Date.now();
+    WILD.mobAt = 0;
+    WILD.targetKey = '';
     WILD.stoppedMsg = '';
     WILD.startedAt = Date.now();
     WILD.statAt = 0;
     WILD.repairAt = 0;
     WILD.wornAt = 0;
     setWildBtn(true);
-    updateWildBar(0);
+    updateWildBar();
     setStatus('野外BOSS：检查金币与统计窗口…');
     var doc = getGameDoc() || document;
     if (await ensureStatWindow(doc)) await resetStats();   // 从 0 开始计击杀
-    WILD.base = statKills() || 0;
     while (WILD.on) {
       try {
         var s = await wildTick();
@@ -4520,7 +4659,7 @@
     '  </div>',
     '  <div class="targetbar"><span class="tlabel">控制账号</span><select id="acct-sel"></select><button class="ghost" id="acct-refresh">刷新</button></div>',
     '  <div class="casbar" id="casbar" style="display:none"><span class="tlabel">起号进度</span><b id="cas-progress">转生 0/5</b><button class="ghost" id="cas-check">查转数</button><button class="ghost" id="cas-reset">重置</button></div>',
-    '  <div class="casbar" id="wildbar" style="display:none"><span class="tlabel">野外BOSS</span><b id="wild-info">活力 100% · 击杀 0/13</b><input id="wild-key" placeholder="地图关键词（可选）" /></div>',
+    '  <div class="casbar" id="wildbar" style="display:none"><span class="tlabel">野外BOSS</span><b id="wild-info">第 1 轮 · 活力约 100% · 本轮 0 只 · 累计 0</b><input id="wild-key" placeholder="地图关键词（可选）" /></div>',
     '  <div class="casbar" id="craftbar" style="display:none"><span class="tlabel">影装</span><b id="craft-info">影碎片 —（点「影装」扫描）</b></div>',
     '  <div class="status" id="status">就绪，点「开始鉴定」</div>',
     '  <div class="taskbar" id="taskbar" style="display:none">',
@@ -6095,7 +6234,7 @@
     }, 500);
   })();
   $('wildbtn').addEventListener('click', function () {
-    if (WILD.on) { WILD.on = false; setWildBtn(false); setStatus('野外BOSS 已停止'); return; }
+    if (WILD.on) { stopWild(''); setStatus('野外BOSS 已停止'); return; }
     wildRun();
   });
   $('craftbtn').addEventListener('click', function () {
