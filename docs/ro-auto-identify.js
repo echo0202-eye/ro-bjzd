@@ -1756,7 +1756,17 @@ function __RO_BOOT__() {
   }
 
   function saveTasks() {
-    try { localStorage.setItem(TASK_KEY, JSON.stringify(TASK_ALL)); } catch (e) {}
+    try {
+      // 多开时各 iframe 共用同一份 localStorage：只回写自己角色的进度，
+      // 否则某个号每 4 秒整表覆盖，会把别的号刚记下的击杀数/监控基线抹掉
+      var k = taskCharKey();
+      if (!k) { localStorage.setItem(TASK_KEY, JSON.stringify(TASK_ALL)); return; }
+      var all = {};
+      try { all = JSON.parse(localStorage.getItem(TASK_KEY) || '{}') || {}; } catch (e) { all = {}; }
+      if (TASK_ALL[k]) all[k] = TASK_ALL[k];
+      TASK_ALL = all;
+      localStorage.setItem(TASK_KEY, JSON.stringify(all));
+    } catch (e) {}
   }
 
   // 狩猎进度只在 NPC 对话里，读到就按角色存下来；任务窗口关着也在 DOM 里，可直接读
