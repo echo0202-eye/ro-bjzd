@@ -3293,12 +3293,15 @@ function __RO_BOOT__() {
     var b = row.querySelector('.npc-shop-item-detail b');
     return (b && (b.getAttribute('title') || b.textContent) || '').trim();
   }
-  // 商店行与目标名是否同一件：先精确（归一化后相等），再退化成「行名以目标名开头」
+  // 商店行与目标名是否同一件：归一化后相等，或只差一个短 ASCII 前缀（等级标记 S/A、T1 之类）
+  // 「精炼短剑」不会被当成「短剑」：中文前缀不放行
   function sameItem(rowN, target) {
     var a = nameKey(rowN), b = nameKey(target);
     if (!a || !b) return false;
     if (a === b) return true;
-    return a.indexOf(b) === 0;
+    if (a.indexOf(b) === 0) return true;
+    var i = a.indexOf(b);
+    return i > 0 && i <= 3 && /^[A-Za-z0-9+\-]+$/.test(a.slice(0, i));
   }
 
   // 商店对话当前停在哪一页：shop=购买/出售菜单，shop_buy=购买道具，shop_sell=出售道具
@@ -3679,7 +3682,7 @@ function __RO_BOOT__() {
     return t.replace(/\[收藏\]\s*/g, '').trim();
   }
 
-  // 名字比对：优先归一化后完全相等，退化成前缀匹配（「短剑」↔「短剑[4]」）
+  // 名字比对：优先归一化后完全相等，退化成 sameItem（允许短 ASCII 前缀）
   function storageMatch(names, nm) {
     var k = nameKey(nm);
     if (!k) return '';
@@ -3688,8 +3691,7 @@ function __RO_BOOT__() {
       if (nameKey(names[i]) === k) return names[i];
     }
     for (i = 0; i < names.length; i++) {
-      var t = nameKey(names[i]);
-      if (t && (k.indexOf(t) === 0 || t.indexOf(k) === 0)) return names[i];
+      if (sameItem(nm, names[i])) return names[i];
     }
     return '';
   }
