@@ -265,19 +265,37 @@ function __RO_BOOT__() {
     };
   }
 
-  // 留/卖建议：评级 S / S- / A 留，B 及以下卖
+  // 留/卖判定：只看加权总分占满分的比例，达到阈值就留，否则卖。
+  // 阈值可在面板「留≥__%」里调，默认 60%，存 localStorage（每个角色各自生效）。
   var GRADE_RANK = { 'S': 6, 'S-': 5, 'A': 4, 'B': 3, 'C': 2, 'D': 1 };
+  var KEEP_RATIO_KEY = 'ro-auto-identify-keep-ratio';
+  var KEEP_RATIO = 0.6;
+  (function loadKeepRatio() {
+    try {
+      var v = parseFloat(localStorage.getItem(KEEP_RATIO_KEY));
+      if (isFinite(v) && v >= 0.1 && v <= 1) KEEP_RATIO = v;
+    } catch (e) {}
+  })();
+  function setKeepRatio(pct) {
+    var v = Math.max(10, Math.min(100, Number(pct) || 60)) / 100;
+    KEEP_RATIO = v;
+    try { localStorage.setItem(KEEP_RATIO_KEY, String(v)); } catch (e) {}
+    return v;
+  }
+  function keepByScore(sc) { return !!sc && sc.max > 0 && sc.ratio >= KEEP_RATIO; }
+
   function advise(sc) {
-    var why = '加权总分 ' + sc.total.toFixed(1) + '/' + sc.max + '（只算第1条、第2条MHP、第4条ATK/MATK）';
+    var pct = Math.round((sc.ratio || 0) * 100);
+    var need = Math.round(KEEP_RATIO * 100);
+    var why = '总分 ' + sc.total.toFixed(1) + '/' + sc.max + '（' + pct + '%）';
     if (sc.allow) why += ' · 限定 ' + sc.allow.join('/') + ' 可用';
     if (sc.offSuit) why += '（属性偏 ' + sc.offSuit + '，但穿不了）';
     else if (sc.suit) why += ' · 适合 ' + sc.suit;
 
-    // 评级 S / S- / A 留，B 及以下卖
-    if (sc.grade === 'S' || sc.grade === 'S-' || sc.grade === 'A') {
-      return { t: '建议留', cls: 'keep', why: '评级 ' + sc.grade + ' · ' + why };
+    if (keepByScore(sc)) {
+      return { t: '建议留', cls: 'keep', why: '评级 ' + sc.grade + ' · ' + why + ' ≥ ' + need + '%' };
     }
-    return { t: '建议卖', cls: 'sell', why: '评级 ' + sc.grade + '（A 以下） · ' + why };
+    return { t: '建议卖', cls: 'sell', why: '评级 ' + sc.grade + ' · ' + why + ' < ' + need + '%' };
   }
 
   function recLabel(rec) {
@@ -3236,8 +3254,8 @@ function __RO_BOOT__() {
     var names = [];
     records.forEach(function (r) {
       if (!r.options || !r.options.length) return;
-      if (r.decision === '保留' || r.decision === '已卖') return;
-      if (r.decision === '卖出' || advise(scoreRecord(r)).t === '建议卖') names.push(r.name);
+      if (r.decision === '保留' || r.decision === '已卖' || r.decision === '存仓') return;
+      if (r.decision === '卖出' || !keepByScore(scoreRecord(r))) pushName(names, r.name);
     });
     return names;
   }
@@ -3246,9 +3264,36 @@ function __RO_BOOT__() {
     return String(n || '').replace(/^\[[^\]]*\]\s*/, '');
   }
 
+  // 名字归一化：去掉「[收藏]」「[S]」这类前缀和所有空白，用于精确比对
+  // 不能直接做子串匹配：卖「短剑」时会把「精炼短剑」一起卖掉
+  function nameKey(n) {
+    var s = String(n || '');
+    for (var i = 0; i < 4; i++) {
+      var t = s.replace(/^\s*\[[^\]]*\]\s*/, '');
+      if (t === s) break;
+      s = t;
+    }
+    return s.replace(/\s+/g, '').trim();
+  }
+  function pushName(list, n) {
+    var k = nameKey(n);
+    if (!k) return;
+    for (var i = 0; i < list.length; i++) {
+      if (nameKey(list[i]) === k) return;
+    }
+    list.push(n);
+  }
+
   function rowName(row) {
     var b = row.querySelector('.npc-shop-item-detail b');
     return (b && (b.getAttribute('title') || b.textContent) || '').trim();
+  }
+  // 商店行与目标名是否同一件：先精确（归一化后相等），再退化成「行名以目标名开头」
+  function sameItem(rowN, target) {
+    var a = nameKey(rowN), b = nameKey(target);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    return a.indexOf(b) === 0;
   }
 
   // 商店对话当前停在哪一页：shop=购买/出售菜单，shop_buy=购买道具，shop_sell=出售道具
@@ -3296,13 +3341,11 @@ function __RO_BOOT__() {
     return !qSel('.npc-dialog-card');
   }
 
-  // 出售页里还有库存的同名行
+  // 出售页里还有库存的同名行（同一件：归一化后相等，或行名以目标名开头，如「短剑[4]」）
   function rowsWithStock(doc, name) {
-    var spin = stripPrefix(name);
     return Array.prototype.slice.call(doc.querySelectorAll('.npc-shop-list .shop-sell-row'))
       .filter(function (row) {
-        var rn = rowName(row);
-        if (rn.indexOf(name) < 0 && (!spin || rn.indexOf(spin) < 0)) return false;
+        if (!sameItem(rowName(row), name)) return false;
         var b = row.querySelector('.shop-sell-all');
         return !!(b && !b.disabled);
       });
@@ -3322,7 +3365,9 @@ function __RO_BOOT__() {
     }
     sellHinted = false;
     var names = (onlyNames && onlyNames.length) ? onlyNames : sellCandidates();
-    names = names.filter(function (n, i) { return n && names.indexOf(n) === i; });
+    var uniq = [];
+    names.forEach(function (n) { pushName(uniq, n); });
+    names = uniq;
     if (!names.length) {
       if (!quiet) setStatus('没有需要卖的装备');
       return 0;
@@ -3333,9 +3378,10 @@ function __RO_BOOT__() {
     if (!onlyNames) {
       records.forEach(function (r) {
         if (!r.name) return;
-        if (r.decision === '保留') prot[r.name] = '已标记保留';
+        var k = nameKey(r.name);
+        if (r.decision === '保留') prot[k] = '已标记保留';
         else if ((!r.decision || r.decision === '待定') && r.options && r.options.length
-          && advise(scoreRecord(r)).t === '建议留') prot[r.name] = '同名里有建议留的词条';
+          && keepByScore(scoreRecord(r))) prot[k] = '同名里有建议留的词条';
       });
     }
 
@@ -3358,7 +3404,7 @@ function __RO_BOOT__() {
     var skipped = [];
 
     // 第一步：把要卖的行全部勾上，用底部「出售所选」一次性卖（一次服务端请求，比逐行点快也更稳）
-    var wanted = names.filter(function (n) { return !prot[n]; });
+    var wanted = names.filter(function (n) { return !prot[nameKey(n)]; });
     var picked = [];
     wanted.forEach(function (n) {
       rowsWithStock(doc, n).forEach(function (row) {
@@ -3418,7 +3464,8 @@ function __RO_BOOT__() {
       }
     }
     names.forEach(function (n) {
-      if (prot[n]) skipped.push(n + '（' + prot[n] + '）');
+      var k = nameKey(n);
+      if (prot[k]) skipped.push(n + '（' + prot[k] + '）');
     });
 
     var sold = Object.keys(soldNames).length;
@@ -3611,17 +3658,35 @@ function __RO_BOOT__() {
     var secs = Array.prototype.slice.call(doc.querySelectorAll('.storage-card .storage-columns section'));
     return { bag: secs[0] || null, box: secs[1] || null };
   }
+  // 最近一次存/取时的诊断信息，失败时用来告诉用户到底卡在哪
+  var storageDiag = { rows: 0, tabs: 0 };
 
-  // 行名：优先纯名字的 span（「[T1]猎人翎羽弓[4][5词条]」），跳过「持有 12 / 库存 3」
+  // 行名：真实结构是 <span><b>[收藏] [T1]名字[4][5词条]</b><small>持有 12</small></span>
+  // 直接读 b 的文本，未鉴定图标等兜底才用 .item-icon
   function storageRowName(row) {
-    var spans = Array.prototype.slice.call(row.querySelectorAll('span'));
-    for (var i = spans.length - 1; i >= 0; i--) {
-      var s = spans[i].textContent.replace(/\s+/g, ' ').trim();
-      if (!s || /持有\s*\d+|库存\s*\d+/.test(s)) continue;
-      return s;
+    var b = row.querySelector('span b') || row.querySelector('b');
+    var t = b ? (b.getAttribute('title') || b.textContent || '') : '';
+    if (!t.trim()) {
+      var ic = row.querySelector('.item-icon');
+      t = ic ? (ic.getAttribute('title') || '') : '';
     }
-    var ic = row.querySelector('.item-icon');
-    return ic ? (ic.getAttribute('title') || '').split('\n')[0].trim() : '';
+    t = String(t).split('\n')[0].replace(/\s+/g, ' ').trim();
+    return t.replace(/\[收藏\]\s*/g, '').trim();
+  }
+
+  // 名字比对：优先归一化后完全相等，退化成前缀匹配（「短剑」↔「短剑[4]」）
+  function storageMatch(names, nm) {
+    var k = nameKey(nm);
+    if (!k) return '';
+    var i;
+    for (i = 0; i < names.length; i++) {
+      if (nameKey(names[i]) === k) return names[i];
+    }
+    for (i = 0; i < names.length; i++) {
+      var t = nameKey(names[i]);
+      if (t && (k.indexOf(t) === 0 || t.indexOf(k) === 0)) return names[i];
+    }
+    return '';
   }
 
   async function storagePickTab(sec, label) {
@@ -3637,22 +3702,25 @@ function __RO_BOOT__() {
   // side: bag=背包（存） box=仓库（取）；优先点「全部」，没有就点单个「存入/取出」
   async function storageTransfer(doc, side, names, btnRe) {
     var done = [];
+    storageDiag = { rows: 0, tabs: 0 };
     var tabs = ['装备', '消耗品', '其他', '卡片'];
     for (var t = 0; t < tabs.length; t++) {
       var sec = storageCols(doc)[side];
       if (!sec) break;
       if (!(await storagePickTab(sec, tabs[t]))) continue;
-      for (var guard = 0; guard < 30; guard++) {
+      storageDiag.tabs++;
+      for (var guard = 0; guard < 60; guard++) {
         var cur = storageCols(doc)[side];
         if (!cur) break;
         var rows = Array.prototype.slice.call(cur.querySelectorAll('.storage-transfer-list > div'));
+        if (rows.length > storageDiag.rows) storageDiag.rows = rows.length;
         var hit = null, hitName = '';
         for (var i = 0; i < rows.length; i++) {
           var nm = storageRowName(rows[i]);
           if (!nm) continue;
-          var k = names.filter(function (n) { return n === nm; })[0]
-            || names.filter(function (n) { return nm.indexOf(n) >= 0 || n.indexOf(nm) >= 0; })[0];
+          var k = storageMatch(names, nm);
           if (!k) continue;
+          // 「全部」按钮点下去就是一次存档请求（数量=该行全部），不需要再点「存入」
           var btn = rows[i].querySelector('button.storage-all')
             || Array.prototype.slice.call(rows[i].querySelectorAll('button')).filter(function (b) {
               return btnRe.test(b.textContent.trim());
@@ -3830,7 +3898,8 @@ function __RO_BOOT__() {
     await closeStorageWindow(doc);
     setStatus(put.length
       ? '已存入 ' + put.length + ' 种到公会仓库'
-      : '背包里没找到勾选的装备（可能已经存过）');
+      : '没存进去：勾选 ' + names.length + ' 种，仓库里看到 ' + storageDiag.rows + ' 行 / ' + storageDiag.tabs + ' 个分类页签'
+        + (storageDiag.rows ? '（名称对不上，可能背包里已没有）' : '（背包栏是空的或页签没切过去）'));
     return put.length;
   }
 
@@ -3899,18 +3968,16 @@ function __RO_BOOT__() {
     return await sellRecommended(false, names);
   }
 
-  // 自动勾选评级 A 以下的装备（B/C/D），只勾选不直接卖；之后用「批量卖出选中」或「邮寄勾选」
+  // 自动勾选总分低于阈值的装备，只勾选不直接卖；之后用「批量卖出选中」或「存仓勾选」
   function selectBelowA() {
-    // 商店是按「装备名」整名出售的，同名里只要有一件 S / S- / A，整名都不能勾，
-    // 否则会把同名的 A 级件一起卖掉
+    // 商店按「装备名」整名出售，同名里只要有一件达到阈值，整名都不能勾
     var byName = {}, unid = 0;
     records.forEach(function (r) {
       if (!r.name) return;
       if (!r.options || !r.options.length) { unid++; return; }
-      var sc = scoreRecord(r);
-      var good = sc.grade === 'S' || sc.grade === 'S-' || sc.grade === 'A';
-      var e = byName[r.name] || (byName[r.name] = { keep: false });
-      if (good) e.keep = true;
+      var k = nameKey(r.name);
+      var e = byName[k] || (byName[k] = { keep: false });
+      if (keepByScore(scoreRecord(r))) e.keep = true;
     });
 
     selected = {};
@@ -3918,42 +3985,46 @@ function __RO_BOOT__() {
     records.forEach(function (r) {
       if (!r.name || r.decision === '已卖') return;
       if (!r.options || !r.options.length) return;
-      if (byName[r.name] && byName[r.name].keep) { keepN++; return; }
+      var e = byName[nameKey(r.name)];
+      if (e && e.keep) { keepN++; return; }
       selected[recKey(r)] = 1;
       n++;
     });
     render();
+    var need = Math.round(KEEP_RATIO * 100);
     setStatus(n
-      ? '已勾选 A 以下 ' + n + ' 件（B/C/D），可用「批量卖出选中」卖出，或「邮寄勾选」寄走'
-        + (keepN ? '；同名有 S/S-/A 的 ' + keepN + ' 件已整名保留' : '')
+      ? '已勾选总分 < ' + need + '% 的 ' + n + ' 件，可用「批量卖出选中」卖出，或「存仓勾选」存起来'
+        + (keepN ? '；同名里有达标的 ' + keepN + ' 件已整名保留' : '')
         + (unid ? '；跳过未鉴定 ' + unid + ' 件' : '')
-      : '没有可勾选的 A 以下装备'
-        + (keepN ? '（' + keepN + ' 件因同名有 A 以上而保留）' : '')
-        + (unid ? '（另有 ' + unid + ' 件未鉴定）' : ''));
+      : '没有可勾选的装备（都达到 ' + need + '% 或未鉴定）'
+        + (keepN ? '（' + keepN + ' 件因同名有达标件而保留）' : ''));
   }
 
-  // 按 S 徽章批量卖：kind='s' 保留整件 S，kind='sminus' 保留整件 S / S-
+  // 按总分批量卖：kind='s' 保留 ≥90%，kind='sminus' 保留 ≥80%
   // 同名装备按整名出售，所以只要同名里有一件达标就整名留下；「已标记保留」的也不卖
   async function sellBelow(kind) {
-    var byName = {};
+    var need = kind === 's' ? 0.9 : 0.8;
+    var byKey = {};
     var unid = 0;
     records.forEach(function (r) {
       if (!r.name || r.decision === '已卖') return;
       if (!r.options || !r.options.length) { unid++; return; }
       var sc = scoreRecord(r);
-      var keep = kind === 's' ? sc.smax > 0 : (sc.smax > 0 || sc.s90 > 0);
-      var e = byName[r.name] || (byName[r.name] = { keep: false, mark: false });
-      if (keep) e.keep = true;
+      var k = nameKey(r.name);
+      var e = byKey[k] || (byKey[k] = { name: r.name, keep: false, mark: false });
+      if (sc.max > 0 && sc.ratio >= need) e.keep = true;
       if (r.decision === '保留') e.mark = true;
     });
-    var names = Object.keys(byName).filter(function (n) { return !byName[n].keep && !byName[n].mark; });
-    var label = kind === 's' ? 'S' : 'S-';
+    var names = Object.keys(byKey).filter(function (k) {
+      return !byKey[k].keep && !byKey[k].mark;
+    }).map(function (k) { return byKey[k].name; });
+    var label = Math.round(need * 100) + '%';
     if (!names.length) {
-      setStatus('没有需要卖的装备：' + label + ' 以下的记录为空'
+      setStatus('没有需要卖的装备：没有低于总分 ' + label + ' 的记录'
         + (unid ? '（另有 ' + unid + ' 件未鉴定，未处理）' : ''));
       return 0;
     }
-    setStatus('批量卖出 ' + label + ' 以下：' + names.length + ' 种装备'
+    setStatus('批量卖出总分 < ' + label + '：' + names.length + ' 种装备'
       + (unid ? '（跳过未鉴定 ' + unid + ' 件）' : ''));
     return await sellRecommended(false, names);
   }
@@ -4316,9 +4387,12 @@ function __RO_BOOT__() {
     '.dec button.on.sell{background:#a3524a;border-color:#8e453e}',
     '.dec button.on.pending{background:#8a8272;border-color:#7a7364}',
     '.empty{padding:18px;text-align:center;color:#a79e8b}',
-    '.wrap.min .status,.wrap.min .tools,.wrap.min .acts,.wrap.min .list{display:none}',
+    '.wrap.min .dragbar,.wrap.min .targetbar,.wrap.min .casbar,.wrap.min .status,.wrap.min .taskbar,.wrap.min .acts,.wrap.min .tools,.wrap.min .acct,.wrap.min .list{display:none}',
+    '.wrap.min .hd{height:22px;padding:1px 6px;gap:5px}',
+    '.wrap.min .hd .grip,.wrap.min .hd .badge,.wrap.min .hd button{display:none}',
+    '.wrap.min .hd #min{display:inline-block}',
+    '.acts #keepratio{width:44px;font:inherit;padding:1px 3px;border:1px solid #d4ccb8;border-radius:4px;background:#fff;color:#3a3a3a}',
     '#mailgo-mini{display:none;background:#4f7a45;border-color:#446b3b;color:#fff}',
-    '.wrap.min #mailgo-mini{display:inline-block}',
     '.targetbar,.casbar{display:flex;align-items:center;gap:6px;padding:5px 9px;background:#fffdf8;border-bottom:1px solid #efe9db;font-size:11px;color:#6f6656}',
     '.casbar input{flex:0 1 108px;min-width:0;font:inherit;padding:2px 5px;border:1px solid #d4ccb8;border-radius:4px;background:#fff;color:#3a3a3a}',
     '.targetbar .tlabel,.casbar .tlabel{flex:none;color:#8d8471}',
@@ -4338,7 +4412,6 @@ function __RO_BOOT__() {
     '.tb-pct{width:34px;text-align:right;color:#958c78;font-size:10.5px;flex:none}',
     '.tb-row.done .tb-num{color:#4f7a45}',
     '.tb-row.done .tb-bar i{background:#4f7a45}',
-    '.wrap.min .taskbar{display:none}',
     '</style>',
     '<div class="wrap min" id="wrap">',
     '  <div class="dragbar" id="dragbar">拖 动 面 板</div>',
@@ -4347,19 +4420,11 @@ function __RO_BOOT__() {
     '    <span class="spacer"></span>',
     '    <button class="primary" id="run">开始鉴定</button>',
     '    <button id="stop" disabled>停止</button>',
-    '    <button id="scan">扫行情</button>',
-    '    <button id="listall">批量上架</button>',
-    '    <button id="stash">存仓库</button>',
     '    <button id="acctbtn">账号</button>',
-    '    <button id="mailbtn">发邮件</button>',
-    '    <button id="mailgo-mini">开始发邮件</button>',
-    '    <button id="claimmail">取邮件</button>',
     '    <button id="casbtn">起号</button>',
     '    <button id="huntbtn">狩猎任务</button>',
     '    <button id="wildbtn">野外BOSS</button>',
     '    <button id="craftbtn">影装</button>',
-    '    <button id="repairbtn">修装备</button>',
-    '    <button id="potionbtn">买药</button>',
     '    <button id="upd" title="重载扩展并刷新页面，加载最新代码">更新</button>',
     '    <span class="ver" id="ver"></span>',
     '    <span class="quota na" id="quota">挂机 —</span>',
@@ -4377,12 +4442,11 @@ function __RO_BOOT__() {
     '  <div class="acts">',
     '    <button id="autosell">自动卖：关</button>',
     '    <button id="sellnow">批量卖出选中</button>',
-    '    <button id="sells" title="只保留带满值 S 词条的装备，其余全部卖掉">卖S以下</button>',
-    '    <button id="sellsmin" title="保留带 S / S- 词条的装备，其余全部卖掉">卖S-以下</button>',
-    '    <button id="sellsa" title="把评级 A 以下的装备（B/C/D）全部勾选，再用「批量卖出选中」卖出或「邮寄勾选」寄走">勾选A以下</button>',
-    '    <button id="list-sel" title="按建议价上架所有勾选的装备（需先「扫行情」拿到市场价）">上架勾选</button>',
-    '    <button id="mail-sel2" title="把勾选的装备（最多 5 件）寄给「发邮件」面板里选的角色">邮寄勾选</button>',
+    '    <button id="sells" title="保留总分 ≥ 满分的 90%，其余全部卖掉">卖掉<90%</button>',
+    '    <button id="sellsmin" title="保留总分 ≥ 满分的 80%，其余全部卖掉">卖掉<80%</button>',
+    '    <button id="sellsa" title="把总分低于阈值的装备全部勾选，再用「批量卖出选中」卖出或「存仓勾选」存起来">勾选低分</button>',
     '    <button id="stash-sel" title="把勾选的装备存进公会仓库（需先和「仓库服务 / 公会仓库」NPC 对话或手动打开仓库）">存仓勾选</button>',
+    '    <span class="selcount">留≥<input id="keepratio" type="number" min="10" max="100" step="5" title="总分达到满分的百分之多少就判定为「建议留」" />%</span>',
     '    <span class="selcount" id="selcount">未勾选</span>',
     '    <span class="hint">' + HOTKEY.label + '</span>',
     '  </div>',
@@ -4392,12 +4456,6 @@ function __RO_BOOT__() {
     '    <button id="clear">清空</button>',
     '  </div>',
     '  <div class="acct" id="acct" style="display:none"></div>',
-    '  <div class="acct" id="mailbox" style="display:none">',
-    '    <div class="ah">发邮件 · 收件人</div>',
-    '    <div class="ar"><span class="an">收件人</span><span class="ai"><select id="mail-target"></select></span></div>',
-    '    <div class="acts"><button id="mail-go">开始发邮件</button><button id="mail-sel" title="把表格里勾选的装备（最多 5 件）寄给上面的收件人">邮寄勾选</button></div>',
-    '    <div class="ai">收件人选皮城辅警：自动反复寄，直到包里没有可寄的东西；选其他账号：只填好收件人 / 标题 / 内容，道具和钱自己手动放。</div>',
-    '  </div>',
     '  <div class="list" id="list"></div>',
     '</div>'
   ].join('');
@@ -5864,9 +5922,18 @@ function __RO_BOOT__() {
   $('sells').addEventListener('click', function () { sellBelow('s'); });
   $('sellsmin').addEventListener('click', function () { sellBelow('sminus'); });
   $('sellsa').addEventListener('click', function () { selectBelowA(); });
-  $('list-sel').addEventListener('click', function () { listSelected(); });
-  $('mail-sel2').addEventListener('click', function () { mailSelected(); });
   $('stash-sel').addEventListener('click', function () { stashSelected(); });
+  (function initKeepRatio() {
+    var inp = $('keepratio');
+    if (!inp) return;
+    inp.value = String(Math.round(KEEP_RATIO * 100));
+    inp.addEventListener('change', function () {
+      var v = setKeepRatio(inp.value);
+      inp.value = String(Math.round(v * 100));
+      render();
+      setStatus('留/卖判定已改为：总分 ≥ ' + Math.round(v * 100) + '% 建议留，其余建议卖');
+    });
+  })();
   $('selinv').addEventListener('click', function () {
     if (!lastShown.length) { setStatus('表格里没有可反选的记录'); return; }
     lastShown.forEach(function (e) {
@@ -5882,25 +5949,6 @@ function __RO_BOOT__() {
     scanning = false;
     setStatus('正在停止…当前这件处理完就停');
   });
-  $('scan').addEventListener('click', function () {
-    if (isSubAccount) { setStatus('小号不启用「扫行情」'); return; }
-    scanMarket();
-  });
-  $('listall').addEventListener('click', function () {
-    if (isSubAccount) { setStatus('小号不启用「批量上架」'); return; }
-    listRecommended();
-  });
-  $('stash').addEventListener('click', function () { stashBatch(); });
-  $('mailbtn').addEventListener('click', function () {
-    var box = $('mailbox');
-    var show = box.style.display === 'none';
-    box.style.display = show ? 'block' : 'none';
-    if (show) { fillMailTargets(); setStatus('发邮件：选好收件人后点「开始发邮件」'); }
-  });
-  $('mail-go').addEventListener('click', function () { mailAll(); });
-  $('mail-sel').addEventListener('click', function () { mailSelected(); });
-  $('mailgo-mini').addEventListener('click', function () { mailAll(); });
-  $('claimmail').addEventListener('click', function () { claimMailAll(); });
   $('casbtn').addEventListener('click', function () {
     if (CAS.on) { CAS.on = false; showCasbar(false); setStatus('起号已停止（转生 ' + CAS.reborns + '/' + CAS_TARGET_REBORN + '）'); return; }
     var doc = getGameDoc() || document;
@@ -5912,20 +5960,8 @@ function __RO_BOOT__() {
     }
     casRun();
   });
-  $('potionbtn').addEventListener('click', async function () {
-    setStatus('检查' + POTION_KEY + '库存…');
-    var doc = getGameDoc() || document;
-    await invTab(doc, '消耗品');
-    var n = potionCount();
-    if (n >= POTION_TARGET) { setStatus('买药：背包已有 ' + n + ' 个' + POTION_KEY + '，不用买'); return; }
-    var msg = await buyPotions(doc);
-    setStatus('买药：' + msg);
-  });
-  $('repairbtn').addEventListener('click', async function () {
-    setStatus('检查损坏装备…');
-    var rp = await tryRepair(getGameDoc() || document);
-    setStatus(rp ? '修理：' + rp : '修理：没有检测到损坏装备（已尝试打开装备窗口）');
-  });
+
+  // 买药 / 修装备不再单独给按钮：狩猎循环和野外 BOSS 里已经按需自动调用 buyPotions / tryRepair
 
   // 挂机途中被怪物技能卸下的装备：每 10 秒查一次，及时穿回
   var wornTimerBusy = false;
