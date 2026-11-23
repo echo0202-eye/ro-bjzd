@@ -136,6 +136,8 @@ async function doEnsure(force) {
   }
 
   var scriptUrl = info.url ? new URL(String(info.url), verUrl).href : joinUrl(base, 'ro-auto-identify.js');
+  // 加版本参数再兜一层：即使托管/CDN 缓存了同名脚本，也不会把新版注册成旧代码
+  scriptUrl += (scriptUrl.indexOf('?') < 0 ? '?' : '&') + 'v=' + encodeURIComponent(ver);
   var code;
   try {
     code = await fetchText(scriptUrl);

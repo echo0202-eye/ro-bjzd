@@ -27,14 +27,18 @@ code = '(function () {\nfunction __RO_BOOT__() {\n' + code +
 
 var out = path.join(root, 'remote');
 fs.mkdirSync(out, { recursive: true });
-fs.writeFileSync(path.join(out, 'ro-auto-identify.js'), code);
+var plain = 'ro-auto-identify.js';
+var versioned = 'ro-auto-identify-' + manifest.version + '.js';
+fs.writeFileSync(path.join(out, plain), code);
+fs.writeFileSync(path.join(out, versioned), code);
 
 var sha = crypto.createHash('sha256').update(code).digest('hex');
+// url 带版本号：避免静态托管/CDN 把同名脚本缓存住，发新版却拉到旧代码
 fs.writeFileSync(path.join(out, 'version.json'), JSON.stringify({
   version: manifest.version,
-  url: 'ro-auto-identify.js',
+  url: versioned,
   sha256: sha,
   at: new Date().toISOString()
 }, null, 2) + '\n');
 
-console.log('remote/ 已生成：v' + manifest.version + ' · ' + sha.slice(0, 12));
+console.log('remote/ 已生成：v' + manifest.version + ' · ' + sha.slice(0, 12) + ' · ' + versioned);
