@@ -264,7 +264,7 @@
   }
 
   // 留/卖判定：只看加权总分占满分的比例，达到阈值就留，否则卖。
-  // 阈值可在面板「留≥__%」里调，默认 60%，存 localStorage（每个角色各自生效）。
+  // 阈值可在面板「留≥__%」里调，默认 60%，存 localStorage（同一域名下所有账号共用）。
   var GRADE_RANK = { 'S': 6, 'S-': 5, 'A': 4, 'B': 3, 'C': 2, 'D': 1 };
   var KEEP_RATIO_KEY = 'ro-auto-identify-keep-ratio';
   var KEEP_RATIO = 0.6;
