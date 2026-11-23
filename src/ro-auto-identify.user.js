@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         北境之地 RO · 自动鉴定
 // @namespace    ro-auto-identify
-// @version      1.8.87
+// @version      1.8.88
 // @description  自动鉴定未鉴定装备，标词条价值、算总分、给留卖建议，可自动补放大镜、自动卖建议卖的装备
 // @match        http://103.45.135.247:3000/*
 // @run-at       document-idle
@@ -2447,6 +2447,7 @@
         hp: hpm ? parseFloat(hpm[1]) : null,
         star: /★/.test(raw),
         attacking: b.classList.contains('manual-target') || !!(b.querySelector('em') && /攻击中/.test(b.textContent)),
+        disabled: !!b.disabled,
         x: xy ? +xy[1] : null,
         y: xy ? +xy[2] : null
       };
@@ -2474,12 +2475,15 @@
       return '已点怪' + (pending ? ' ' + pending.name : '') + '，等开始攻击…';
     }
 
+    var usable = rows.filter(function (r) { return !r.disabled; });
+    if (!usable.length) { WILD.targetKey = ''; return '魔物暂时都不可攻击（等刷新）…'; }
+
     function hpOf(r) { return r.hp == null ? 999 : r.hp; }
     function distOf(r) {
       if (r.x == null || pos.x == null) return 9999;
       return Math.abs(r.x - pos.x) + Math.abs(r.y - pos.y);
     }
-    var pick = rows.slice().sort(function (a, b) {
+    var pick = usable.slice().sort(function (a, b) {
       if (a.star !== b.star) return a.star ? -1 : 1;
       if (hpOf(a) !== hpOf(b)) return hpOf(a) - hpOf(b);
       return distOf(a) - distOf(b);
