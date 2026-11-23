@@ -16,7 +16,9 @@
 1. `chrome://extensions` → 打开「开发者模式」→「加载已解压的扩展程序」→ 选 `ro-extension`。
 2. 进扩展「详情」，打开 **允许运行用户脚本**（不开热更新必失败）。
 3. 打开游戏页 `http://103.45.135.247:3000/`，面板上 **Shift+左键「更新」** 填远程地址：
-   `https://<你的用户名>.github.io/<仓库名>`
+   `https://echo0202-eye.github.io/ro-bjzd`
+
+无网络限制时的整包下载：`https://codeload.github.com/echo0202-eye/ro-bjzd/zip/refs/heads/main`
 
 ## 开发
 
