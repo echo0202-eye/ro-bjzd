@@ -2232,7 +2232,7 @@
   var WILD_STOP = 35;                   // 低于 35% 有重罚，到 35% 就收手
   var WILD_KILLS = Math.round((100 - WILD_STOP) / WILD_STEP);   // 约 13 只
   var WILD_KEY = 'ro-auto-identify-wild-v1';
-  var WILD = { on: false, map: '', base: 0, key: '', done: false, startedAt: 0, statAt: 0, repairAt: 0, wornAt: 0, stoppedMsg: '' };
+  var WILD = { on: false, map: '', base: 0, key: '', done: false, doneReason: '', round: 0, total: 0, startedAt: 0, statAt: 0, repairAt: 0, wornAt: 0, stoppedMsg: '' };
 
   try { WILD.key = localStorage.getItem(WILD_KEY) || ''; } catch (e) {}
 
@@ -2379,9 +2379,11 @@
     bar.style.display = 'flex';
     var b = $('wild-info');
     if (!b) return;
-    if (kills == null) { b.textContent = '活力 —（统计窗口没打开）'; return; }
+    var round = '第 ' + Math.max(1, (WILD.round || 0) + 1) + ' 轮';
+    var total = ' · 累计 ' + (WILD.total || 0);
+    if (kills == null) { b.textContent = round + ' · 活力 —（统计窗口没打开）' + total; return; }
     var vigor = Math.max(0, 100 - WILD_STEP * kills);
-    b.textContent = '活力约 ' + vigor + '% · 击杀 ' + kills + '/' + WILD_KILLS;
+    b.textContent = round + ' · 活力约 ' + vigor + '% · 本轮 ' + kills + '/' + WILD_KILLS + total;
   }
 
   function stopWild(msg) {
@@ -2459,10 +2461,24 @@
       return '角色倒下，已点「返回城镇」复活' + tag;
     }
 
-    // 本轮打完已回城：收工
+    // 本轮打完已回城：修装备、重置统计、自动续下一轮（金币不足才收工）
     if (WILD.done && /rag_fes/i.test(pos.map || '')) {
-      stopWild('本轮完成（击杀 ' + WILD_KILLS + ' 只，活力约 ' + WILD_STOP + '%），回城收工' + tag);
-      return '';
+      if (WILD.doneReason === 'timeout') {
+        stopWild('统计窗口不可用，已挂 40 分钟，累计击杀 ' + (WILD.total || 0) + '，收工' + tag);
+        return '';
+      }
+      WILD.round = (WILD.round || 0) + 1;
+      WILD.done = false;
+      WILD.doneReason = '';
+      WILD.map = '';
+      var rp = '';
+      if (brokenNames().length) rp = await tryRepair(doc);
+      if (await ensureStatWindow(doc)) await resetStats();     // 新一轮从 0 开始计
+      WILD.base = statKills() || 0;
+      WILD.statAt = 0;
+      updateWildBar(0);
+      return '第 ' + WILD.round + ' 轮完成（累计击杀 ' + (WILD.total || 0) + '），回城补给完毕，继续下一轮' +
+        (rp ? '（' + rp + '）' : '') + tag;
     }
 
     var onWild = WILD.map && pos.map === WILD.map;
@@ -2486,13 +2502,16 @@
       var kills = kn == null ? null : Math.max(0, kn - WILD.base);
       updateWildBar(kills);
 
-      // 到 35%：停挂机、回城
+      // 到 35%：停挂机、回城，回城后自动续下一轮
       if (kills != null && kills >= WILD_KILLS) {
         var fb = farmButton(doc);
         if (fb && fb.textContent.trim() === '停止挂机') { tapEl(fb); await sleep(900); }
         WILD.map = '';
         WILD.done = true;
-        return '达 ' + WILD_STOP + '%（击杀 ' + kills + '），停止挂机并回城' + tag;
+        WILD.doneReason = 'kills';
+        WILD.total = (WILD.total || 0) + kills;
+        updateWildBar(kills);
+        return '达 ' + WILD_STOP + '%（击杀 ' + kills + '，累计 ' + WILD.total + '），停止挂机并回城补给' + tag;
       }
       // 兜底：统计窗口一直不可用时，最多挂 40 分钟就回城
       if (kills == null && Date.now() - (WILD.startedAt || 0) > 40 * 60 * 1000) {
@@ -2500,13 +2519,15 @@
         if (fb0 && fb0.textContent.trim() === '停止挂机') { tapEl(fb0); await sleep(900); }
         WILD.map = '';
         WILD.done = true;
+        WILD.doneReason = 'timeout';
         return '统计窗口不可用，已挂 40 分钟，停止挂机并回城' + tag;
       }
 
       var f = await huntStartFarm(doc);
       if (f === 'started' || f === 'running') {
-        return '挂机中 · 活力约 ' + (kills == null ? '—' : (100 - WILD_STEP * kills) + '%') +
-          '（击杀 ' + (kills == null ? '?' : kills) + '/' + WILD_KILLS + '）' + tag;
+        return '第 ' + Math.max(1, (WILD.round || 0) + 1) + ' 轮挂机中 · 活力约 ' +
+          (kills == null ? '—' : (100 - WILD_STEP * kills) + '%') +
+          '（本轮 ' + (kills == null ? '?' : kills) + '/' + WILD_KILLS + '，累计 ' + (WILD.total || 0) + '）' + tag;
       }
       return (f === 'nofarm' ? '没找到顶栏「开始挂机」按钮' : '点了「开始挂机」但没生效（挂机额度可能用完）') + tag;
     }
@@ -2525,7 +2546,7 @@
 
     // 传送前检查金币（不足就不点，避免白跑）
     if (!(info.zeny >= WILD_COST)) {
-      stopWild('金币不足 20 万（当前 ' + (info.zeny || 0) + '），先攒钱再刷野外BOSS' + tag);
+      stopWild('金币不足 20 万（当前 ' + (info.zeny || 0) + '），已刷 ' + (WILD.round || 0) + ' 轮、累计击杀 ' + (WILD.total || 0) + '，先攒钱' + tag);
       return '';
     }
 
@@ -2550,7 +2571,10 @@
     }
     WILD.on = true;
     WILD.done = false;
+    WILD.doneReason = '';
     WILD.map = '';
+    WILD.round = 0;
+    WILD.total = 0;
     WILD.stoppedMsg = '';
     WILD.startedAt = Date.now();
     WILD.statAt = 0;
