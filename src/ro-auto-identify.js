@@ -1399,6 +1399,13 @@
 
   // 小步走向目标（只发一次 #web:move，短等待），用于回城后 NPC 还没进视野时靠近
   async function casStepTo(doc, x, y) {
+    // 目标正好是 NPC 站的那一格：改走旁边一格。服务端会围着被占的格子反复绕，
+    // 表现就是「在 NPC 左右晃」；远程对话本来也不需要贴身。
+    var npcs = [SHOP_NPC, HUNT_WARP, CAS_NPC, WILD_NPC, CRAFT_NPC];
+    for (var ni = 0; ni < npcs.length; ni++) {
+      var n0 = npcs[ni];
+      if (n0 && n0.x === x && n0.y === y) { x = x - 1; break; }
+    }
     var p = mapInfo(doc);
     if (p.x == null) return '';
     var dNow = Math.abs(p.x - x) + Math.abs(p.y - y);
@@ -1419,6 +1426,12 @@
     if (CAS.posHist.length > 10) CAS.posHist.shift();
     var same = CAS.posHist.filter(function (k) { return k === pk; }).length;
     if (same >= 3 && dNow <= 8) return 'near';
+    // 在相邻两格之间来回蹭（寻路绕 NPC）：也当作已到位
+    if (CAS.posHist.length >= 6 && dNow <= 8) {
+      var uniq = {};
+      CAS.posHist.slice(-6).forEach(function (k) { uniq[k] = 1; });
+      if (Object.keys(uniq).length <= 2) return 'near';
+    }
     // 同一条移动指令还在生效时不要重发：每 1.7 秒发一次会不断打断寻路，角色反而原地不动
     if (CAS.lastMoveTo === tgt) {
       if (dNow < (CAS.lastDist == null ? Infinity : CAS.lastDist)) {
