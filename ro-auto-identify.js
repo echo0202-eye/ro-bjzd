@@ -3601,8 +3601,12 @@ function __RO_BOOT__() {
     var want = page === '出售道具' ? 'shop_sell' : 'shop_buy';
     if (shopAction(doc) === want) return true;
     if (!qSel('.npc-dialog-card')) {
-      await casStepTo(doc, SHOP_NPC.x, SHOP_NPC.y);
-      if (!(await casOpenNpc(doc, '消耗品售卖机', SHOP_NPC))) return false;
+      // NPC 列表里点一下就是远程对话，不用走到旁边；走不到才小步靠近。
+      // （以前无条件先走过去，散场再走回来，看起来就是在 NPC 旁边左右晃）
+      if (!(await casOpenNpc(doc, '消耗品售卖机', SHOP_NPC))) {
+        await casStepTo(doc, SHOP_NPC.x, SHOP_NPC.y);
+        if (!(await casOpenNpc(doc, '消耗品售卖机', SHOP_NPC))) return false;
+      }
       await sleep(600);
     }
     if (shopAction(doc) === 'shop') {
