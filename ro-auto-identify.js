@@ -4658,7 +4658,7 @@ function __RO_BOOT__() {
     '    <button id="huntbtn">狩猎任务</button>',
     '    <button id="wildbtn">野外BOSS</button>',
     '    <button id="craftbtn">影装</button>',
-    '    <button id="layoutbtn" title="把指定角色的窗口位置/大小/吸附关系复制到其他账号（会刷新页面）">套用布局</button>',
+    '    <button id="layoutbtn" title="把指定账号的窗口位置/大小/吸附关系复制到其他账号（会刷新页面）">套用布局</button>',
     '    <button id="upd" title="重载扩展并刷新页面，加载最新代码">更新</button>',
     '    <span class="ver" id="ver"></span>',
     '    <span class="quota na" id="quota">挂机 —</span>',
@@ -6248,10 +6248,10 @@ function __RO_BOOT__() {
     if (CRAFT.on) { CRAFT.on = false; setCraftBtn(false); setStatus('影装合成 已停止'); return; }
     craftRun();
   });
-  // 套用布局：把源角色的浮动窗口布局（位置/大小/吸附关系）复制到其他账号
-  // 游戏按「角色名」分别存 localStorage：rathena-game-window-layout-v17:<角色名>
+  // 套用布局：把源账号的浮动窗口布局（位置/大小/吸附关系）复制到其他账号
+  // 游戏按「登录账号名」分别存 localStorage：rathena-game-window-layout-v17:<账号名>
   $('layoutbtn').addEventListener('click', function () {
-    var src = String(window.prompt('把哪个角色的窗口布局套用到其他账号？', '明知山') || '').trim();
+    var src = String(window.prompt('把哪个账号的窗口布局套用到其他账号？', '明知山') || '').trim();
     if (!src) return;
     var r = copyWindowLayout(src);
     if (!r.ok) { setStatus('套用布局：' + r.msg); return; }
@@ -6261,7 +6261,10 @@ function __RO_BOOT__() {
       try { window.top.location.reload(); } catch (e) { location.reload(); }
     }, 1200);
   });
-  // 复制角色布局；返回 {ok, msg, done[], keys}
+  function normAccountName(s) {
+    return String(s || '').trim().replace(/_[mMfF]$/, '').toLowerCase();
+  }
+  // 复制账号布局；返回 {ok, msg, done[], keys}
   function copyWindowLayout(srcName) {
     var LAYOUT_KEYS = [
       'rathena-game-window-layout-v17',
@@ -6270,35 +6273,48 @@ function __RO_BOOT__() {
       'rathena-social-layout-v1',
       'rathena-party-layout-v2'
     ];
-    var suffix = ':' + encodeURIComponent(srcName.toLowerCase());
-    var data = {};
+    var src = normAccountName(srcName);
+    var suffix = ':' + encodeURIComponent(src);
+    var data = {}, owners = [];
     try {
       for (var i = 0; i < localStorage.length; i++) {
         var k = localStorage.key(i) || '';
-        if (k.slice(-suffix.length) !== suffix) continue;
+        var hit = null;
         for (var j = 0; j < LAYOUT_KEYS.length; j++) {
-          if (k.indexOf(LAYOUT_KEYS[j] + ':') === 0) {
-            data[LAYOUT_KEYS[j]] = localStorage.getItem(k);
-            break;
-          }
+          if (k.indexOf(LAYOUT_KEYS[j] + ':') === 0) { hit = LAYOUT_KEYS[j]; break; }
         }
+        if (!hit) continue;
+        var who = k.slice(hit.length + 1);
+        if (owners.indexOf(who) < 0) owners.push(who);
+        if (k.slice(-suffix.length) === suffix) data[hit] = localStorage.getItem(k);
       }
     } catch (e) { return { ok: false, msg: '读取布局失败：' + e.message }; }
     var keys = Object.keys(data);
-    if (!keys.length) return { ok: false, msg: '本机没有「' + srcName + '」保存的布局（该角色要先登录过）' };
+    if (!keys.length) {
+      var names = owners.map(function (n) { try { return decodeURIComponent(n); } catch (e) { return n; } });
+      return { ok: false, msg: '本机没有「' + srcName + '」的布局' + (names.length ? '；有布局的账号：' + names.join('、') : '（该账号要先登录过）') };
+    }
 
-    var done = [], skip = [];
-    gameDocs().forEach(function (x) {
-      var nm = charNameOf(x.doc);
-      if (!nm) { skip.push('未进角色'); return; }
-      if (nm.toLowerCase() === srcName.toLowerCase()) return;
-      var t = ':' + encodeURIComponent(nm.toLowerCase());
+    // 目标账号：游戏多开配置里的账号名（与游戏自己写布局用的名字一致）
+    var targets = [];
+    try {
+      var cfg = JSON.parse(localStorage.getItem('rathena-multi-accounts:v1') || '{}');
+      (cfg.accounts || []).forEach(function (a) {
+        var n = normAccountName(a && a.username);
+        if (n && n !== src && targets.indexOf(n) < 0) targets.push(n);
+      });
+    } catch (e) {}
+    if (!targets.length) return { ok: false, msg: '没读到多开账号列表（' + owners.length + ' 个账号有布局）' };
+
+    var done = [], fail = [];
+    targets.forEach(function (n) {
+      var t = ':' + encodeURIComponent(n);
       try {
         keys.forEach(function (k) { localStorage.setItem(k + t, data[k]); });
-        done.push(nm);
-      } catch (e) { skip.push(nm); }
+        done.push(n);
+      } catch (e) { fail.push(n); }
     });
-    return { ok: true, msg: skip.length ? '跳过 ' + skip.join('、') : '', done: done, keys: keys.length };
+    return { ok: true, msg: fail.length ? '写入失败：' + fail.join('、') : '', done: done, keys: keys.length };
   }
   // 野外BOSS 目标地图关键词：留空则选传送列表第一项
   (function initWildKey() {
