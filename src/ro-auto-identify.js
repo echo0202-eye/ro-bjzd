@@ -3421,9 +3421,9 @@
         await sleep(STEP_GAP);
       } catch (err) {
         if (err && err.code === 'NO_LOUPE') {
-          if (buyTries >= 3) { setStatus('连续补货失败 3 次，已停止（检查寄售里放大镜是否有货）'); break; }
+          if (buyTries >= 3) { setStatus('连续补货失败 3 次，已停止（寄售和消耗品售卖机都没有放大镜）'); break; }
           buyTries++;
-          setStatus('放大镜用完了，自动购买并领取…');
+          setStatus('放大镜用完了，自动购买（寄售 → 消耗品售卖机）…');
           var nb = await buyLoupes(Math.min(Math.max(1, unidCount()), 99));
           if (nb > 0) {
             setStatus('已自动补 ' + nb + ' 个放大镜，继续鉴定');
@@ -3794,7 +3794,7 @@
     // 鉴定完再卖一轮，尽量把背包腾出来
     sold += await huntSellGear(doc);
     // 卖完剩下的、判定保留但没穿的装备存公会仓库，避免背包长期卡满
-    var stash = await huntStashUnused(doc);
+    var stash = await huntStashLoot(doc);
     if (stash < 0) stash = 0;
     var bu = bagUsage(doc);
     // 腾不出空间就别每 20 秒重来一次（等 5 分钟再试）
@@ -3818,7 +3818,7 @@
     return '鉴定 ' + done + ' 件、卖 ' + sold + ' 种'
       + (stash ? '、存仓 ' + stash + ' 种' : '')
       + (noMoney ? '；没钱买放大镜（ZENY ' + ((railInfo(doc) || {}).zeny || 0) + '）' : '')
-      + (loupeFail ? '；补不到放大镜（寄售没有可买挂单或购买失败）' : '')
+      + (loupeFail ? '；补不到放大镜（寄售没挂单，消耗品售卖机也没买到）' : '')
       + (bu ? '；背包 ' + bu.used + '/' + bu.cap : '');
   }
 
@@ -4021,8 +4021,17 @@
     return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
   }
 
-  // 狩猎回城卖完装备后：把鉴定过、判定「建议留」但没穿的装备也存进公会仓库，别让背包一直卡满
-  async function huntStashUnused(doc) {
+  // 存仓保留名单：留在背包里（翅膀跑图、双补药练级、放大镜鉴定）
+  var STASH_KEEP = ['双补药', '蝴蝶翅膀', '苍蝇翅膀', '放大镜'];
+  function stashKeepName(nm) {
+    for (var i = 0; i < STASH_KEEP.length; i++) {
+      if (nm.indexOf(STASH_KEEP[i]) >= 0) return true;
+    }
+    return false;
+  }
+
+  // 鉴定过、判定「建议留」且还没存仓的装备名
+  function keepGearNames() {
     var names = [];
     records.forEach(function (r) {
       if (!r || !r.name || r.stored) return;
@@ -4033,11 +4042,38 @@
       if (t !== '建议留') return;                        // 建议卖的已在 huntSellGear 处理
       if (names.indexOf(r.name) < 0) names.push(r.name);
     });
+    return names;
+  }
+
+  // 背包里的战利品：消耗品/其他/卡片里，除保留名单（翅膀、双补药、放大镜）外的全部
+  async function bagLootNames(doc) {
+    var out = [];
+    var tabs = ['消耗品', '其他', '卡片'];
+    for (var i = 0; i < tabs.length; i++) {
+      await ensureInvWindow(doc);
+      if (!(await invTab(doc, tabs[i]))) continue;
+      qAll('.inventory-cell').forEach(function (c) {
+        var nm = invItemName(c);
+        if (!nm || /未鉴定/.test(nm) || stashKeepName(nm)) return;
+        if (out.indexOf(nm) < 0) out.push(nm);
+      });
+    }
+    await invTab(doc, '装备');
+    return out;
+  }
+
+  // 狩猎回城卖完装备后：装备先筛选（建议留的），连同其余战利品一起存进公会仓库
+  async function huntStashLoot(doc) {
+    var names = keepGearNames();
+    var loot = await bagLootNames(doc);
+    loot.forEach(function (nm) { if (names.indexOf(nm) < 0) names.push(nm); });
     if (!names.length) return 0;
     if (!(await openStorageWindow(doc))) return -1;      // 找不到（公会）仓库 NPC
     var put = await depositNames(doc, names);
     if (put.length) {
-      records.forEach(function (r) { if (put.indexOf(r.name) >= 0) { r.stored = 1; r.decision = '存仓'; } });
+      records.forEach(function (r) {
+        if (!r.stored && put.indexOf(r.name) >= 0) { r.stored = 1; r.decision = '存仓'; }
+      });
       saveRecords(); render();
     }
     await closeStorageWindow(doc);
@@ -4134,22 +4170,28 @@
     return put.length;
   }
 
-  // 狩猎回城时：存 S 装 → 取仓库里本职业对口的 S 装 → 双击穿上（每件只穿一次）
+  // 狩猎回城时：存装备（S + 建议留）和全部战利品 → 取仓库里本职业对口的 S 装 → 双击穿上（每件只穿一次）
   async function huntStashAndEquip(doc) {
     var job = myJobBucket(doc);
     var sRecs = sRecords();
-    if (!sRecs.length) return '';
     var pending = [];
     sRecs.forEach(function (r) { if (!r.stored && pending.indexOf(r.name) < 0) pending.push(r.name); });
-    if (!pending.length) return '';
+    // 非 S 但判定「建议留」的装备也要存；消耗品/其他/卡片除保留名单外全存
+    keepGearNames().forEach(function (n) { if (pending.indexOf(n) < 0) pending.push(n); });
+    var loot = await bagLootNames(doc);
+    var all = pending.slice();
+    loot.forEach(function (n) { if (all.indexOf(n) < 0) all.push(n); });
+    if (!all.length) return '';
 
     if (!(await openStorageWindow(doc))) return '找不到公会仓库 NPC（跳过存装）';
     var out = [];
-    var put = await depositNames(doc, pending);
+    var put = await depositNames(doc, all);
     if (put.length) {
-      records.forEach(function (r) { if (put.indexOf(r.name) >= 0) r.stored = 1; });
+      records.forEach(function (r) { if (!r.stored && put.indexOf(r.name) >= 0) r.stored = 1; });
       saveRecords(); render();
-      out.push('存入 ' + put.length + ' 种 S 装备');
+      var gearN = put.filter(function (n) { return pending.indexOf(n) >= 0; }).length;
+      if (gearN) out.push('存入 ' + gearN + ' 种装备');
+      if (put.length > gearN) out.push('存入 ' + (put.length - gearN) + ' 种战利品');
     }
 
     var EQ_KEY = 'ro-auto-identify-s-equipped-v1';
@@ -4375,7 +4417,7 @@
   }
 
   // 只买名字含「放大镜」且单价不高于 5000 的挂单，买不到就放弃
-  async function buyLoupes(want) {
+  async function buyLoupesAuction(want) {
     var doc = getGameDoc();
     if (!doc) return 0;
     var win = auctionWindow(doc) || await ensureAuctionOpen(doc);
@@ -4485,6 +4527,73 @@
       }
     }
     return bought;
+  }
+
+  // 背包里的放大镜数量（调用前先切到「消耗品」页签）
+  function loupeCount() {
+    var n = 0;
+    qAll('.inventory-cell').forEach(function (c) {
+      if (invItemName(c).indexOf('放大镜') < 0) return;
+      var em = c.querySelector('em');
+      n += em ? (parseInt(em.textContent, 10) || 1) : 1;
+    });
+    return n;
+  }
+
+  // 寄售没货时的兜底：去 NPC「消耗品售卖机」买放大镜
+  async function buyLoupesNpc(doc, want) {
+    await invTab(doc, '消耗品');
+    var before = loupeCount();
+    if (!(await openShopPage(doc, '购买道具'))) return 0;
+    await waitFor(function () { return qSel('.shop-buy-row'); }, 3000);
+
+    var findRow = function () {
+      return qAll('.shop-buy-row').filter(function (r) {
+        var b = r.querySelector('.npc-shop-item-detail b');
+        return b && /放大镜/.test(b.textContent || '');
+      })[0];
+    };
+    var row = findRow();
+    if (!row) { await closeShop(doc); return 0; }
+
+    for (var round = 0; round < 4; round++) {
+      var need = want - (loupeCount() - before);
+      if (need <= 0) break;
+      var inp = row.querySelector('input[type="number"]');
+      if (inp) setVal(inp, String(need));
+      var buy = Array.prototype.slice.call(row.querySelectorAll('button')).filter(function (b) {
+        return b.textContent.trim() === '购买' && !b.disabled;
+      })[0];
+      if (!buy) break;
+      buy.click();
+      await sleep(1400);
+      row = findRow();       // 购买后列表会重渲染，必须重新查行
+      if (!row) break;
+    }
+    await closeShop(doc);
+    var got = loupeCount() - before;
+    return got > 0 ? got : 0;
+  }
+
+  // 先寄售买；寄售没有挂单或买不到，再去消耗品售卖机
+  async function buyLoupes(want) {
+    var got = await buyLoupesAuction(want);
+    if (got > 0) return got;
+    var doc = getGameDoc();
+    if (!doc) return 0;
+    // 寄售窗口还开着会挡住商店对话，先关掉
+    await closeAuctionWindow(doc);
+    await sleep(400);
+    // 消耗品售卖机只在主城；不在主城就别乱跑地图
+    var pos = mapInfo(doc) || {};
+    if (!/rag_fes/i.test(pos.map || '')) {
+      setStatus('寄售没货，且当前不在主城，无法去消耗品售卖机补放大镜');
+      return 0;
+    }
+    var n = await buyLoupesNpc(doc, want);
+    if (n > 0) setStatus('寄售没货，已从消耗品售卖机买 ' + n + ' 个放大镜');
+    else setStatus('寄售和消耗品售卖机都没买到放大镜');
+    return n;
   }
 
   /* ---------------- 面板 ---------------- */

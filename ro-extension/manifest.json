@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "北境之地 RO · 自动鉴定",
-  "version": "1.8.93",
+  "version": "1.8.94",
   "description": "自动鉴定未鉴定装备，标词条价值、算总分、给留卖建议，可自动卖掉建议卖的装备。",
   "permissions": ["storage", "userScripts"],
   "host_permissions": ["http://103.45.135.247:3000/*", "https://raw.githubusercontent.com/*", "https://*.github.io/*", "http://127.0.0.1:8081/*", "http://localhost:8081/*"],
