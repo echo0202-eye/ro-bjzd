@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         北境之地 RO · 自动鉴定
 // @namespace    ro-auto-identify
-// @version      1.8.103
+// @version      1.8.104
 // @description  自动鉴定未鉴定装备，标词条价值、算总分、给留卖建议，可自动补放大镜、自动卖建议卖的装备
 // @match        http://103.45.135.247:3000/*
 // @run-at       document-idle
@@ -4147,8 +4147,8 @@
     return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
   }
 
-  // 存仓保留名单：留在背包里（翅膀跑图、双补药练级、放大镜鉴定、箭矢是弹药不能存）
-  var STASH_KEEP = ['双补药', '蝴蝶翅膀', '苍蝇翅膀', '放大镜', '箭矢'];
+  // 存仓保留名单：留在背包里（翅膀跑图、双补药练级、放大镜鉴定、箭矢是弹药、门票要随手用）
+  var STASH_KEEP = ['双补药', '蝴蝶翅膀', '苍蝇翅膀', '放大镜', '箭矢', '道场门票'];
   function stashKeepName(nm) {
     for (var i = 0; i < STASH_KEEP.length; i++) {
       if (nm.indexOf(STASH_KEEP[i]) >= 0) return true;
