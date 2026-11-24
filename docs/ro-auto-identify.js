@@ -4658,6 +4658,7 @@ function __RO_BOOT__() {
     '    <button id="huntbtn">狩猎任务</button>',
     '    <button id="wildbtn">野外BOSS</button>',
     '    <button id="craftbtn">影装</button>',
+    '    <button id="layoutbtn" title="把指定角色的窗口位置/大小/吸附关系复制到其他账号（会刷新页面）">套用布局</button>',
     '    <button id="upd" title="重载扩展并刷新页面，加载最新代码">更新</button>',
     '    <span class="ver" id="ver"></span>',
     '    <span class="quota na" id="quota">挂机 —</span>',
@@ -6247,6 +6248,58 @@ function __RO_BOOT__() {
     if (CRAFT.on) { CRAFT.on = false; setCraftBtn(false); setStatus('影装合成 已停止'); return; }
     craftRun();
   });
+  // 套用布局：把源角色的浮动窗口布局（位置/大小/吸附关系）复制到其他账号
+  // 游戏按「角色名」分别存 localStorage：rathena-game-window-layout-v17:<角色名>
+  $('layoutbtn').addEventListener('click', function () {
+    var src = String(window.prompt('把哪个角色的窗口布局套用到其他账号？', '明知山') || '').trim();
+    if (!src) return;
+    var r = copyWindowLayout(src);
+    if (!r.ok) { setStatus('套用布局：' + r.msg); return; }
+    if (!r.done.length) { setStatus('套用布局：没有可套用的其他账号（' + r.msg + '）'); return; }
+    setStatus('布局已套用到 ' + r.done.join('、') + '（' + r.keys + ' 类窗口），正在刷新页面…');
+    setTimeout(function () {
+      try { window.top.location.reload(); } catch (e) { location.reload(); }
+    }, 1200);
+  });
+  // 复制角色布局；返回 {ok, msg, done[], keys}
+  function copyWindowLayout(srcName) {
+    var LAYOUT_KEYS = [
+      'rathena-game-window-layout-v17',
+      'rathena-autoattack-layout-v1',
+      'rathena-statistics-layout-v1',
+      'rathena-social-layout-v1',
+      'rathena-party-layout-v2'
+    ];
+    var suffix = ':' + encodeURIComponent(srcName.toLowerCase());
+    var data = {};
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i) || '';
+        if (k.slice(-suffix.length) !== suffix) continue;
+        for (var j = 0; j < LAYOUT_KEYS.length; j++) {
+          if (k.indexOf(LAYOUT_KEYS[j] + ':') === 0) {
+            data[LAYOUT_KEYS[j]] = localStorage.getItem(k);
+            break;
+          }
+        }
+      }
+    } catch (e) { return { ok: false, msg: '读取布局失败：' + e.message }; }
+    var keys = Object.keys(data);
+    if (!keys.length) return { ok: false, msg: '本机没有「' + srcName + '」保存的布局（该角色要先登录过）' };
+
+    var done = [], skip = [];
+    gameDocs().forEach(function (x) {
+      var nm = charNameOf(x.doc);
+      if (!nm) { skip.push('未进角色'); return; }
+      if (nm.toLowerCase() === srcName.toLowerCase()) return;
+      var t = ':' + encodeURIComponent(nm.toLowerCase());
+      try {
+        keys.forEach(function (k) { localStorage.setItem(k + t, data[k]); });
+        done.push(nm);
+      } catch (e) { skip.push(nm); }
+    });
+    return { ok: true, msg: skip.length ? '跳过 ' + skip.join('、') : '', done: done, keys: keys.length };
+  }
   // 野外BOSS 目标地图关键词：留空则选传送列表第一项
   (function initWildKey() {
     var el = $('wild-key');
