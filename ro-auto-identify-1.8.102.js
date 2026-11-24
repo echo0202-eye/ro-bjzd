@@ -879,6 +879,13 @@ function __RO_BOOT__() {
     // 血量：rail 里是「HP9657/10321SP741/1557」
     var vTxt = (s.querySelector('.rail-vitals') || {}).textContent || '';
     var vhp = vTxt.replace(/\s+/g, '').match(/HP([\d,]+)\/([\d,]+)/i);
+    // 负重：rail 里是「负重2760.9 / 4830.0 (57%)」
+    var wEl = facts.filter(function (x) {
+      var dt = x.querySelector('dt');
+      return dt && dt.textContent.indexOf('负重') >= 0;
+    })[0];
+    var wTxt = (wEl && wEl.querySelector('dd')) ? wEl.querySelector('dd').textContent.replace(/,/g, '') : '';
+    var wm = wTxt.match(/([\d.]+)\s*\/\s*([\d.]+)/);
     return {
       baseMax: !!base.max,
       jobMax: !!job.max,
@@ -894,6 +901,9 @@ function __RO_BOOT__() {
       zeny: zm ? parseInt(zm[1].replace(/,/g, ''), 10) : 0,
       hp: vhp ? parseInt(vhp[1].replace(/,/g, ''), 10) : 0,
       hpMax: vhp ? parseInt(vhp[2].replace(/,/g, ''), 10) : 0,
+      weight: wm ? parseFloat(wm[1]) : null,
+      weightMax: wm ? parseFloat(wm[2]) : null,
+      weightPct: wm ? Math.round(parseFloat(wm[1]) / parseFloat(wm[2]) * 100) : null,
       idleSec: idleSec
     };
   }
@@ -1980,6 +1990,13 @@ function __RO_BOOT__() {
         HUNT.sellAt = Date.now();
         var sj = await huntSellJunk(doc);
         if (sj) return '回城卖装备：' + sj + tag;
+      }
+      // 负重过半就先把铝这类材料/战利品存仓库，否则买东西时一直提示「负重不足」
+      var wi = railInfo(doc);
+      if (wi && wi.weightPct != null && wi.weightPct >= 70 && Date.now() - (HUNT.stashWAt || 0) > 60000) {
+        HUNT.stashWAt = Date.now();
+        var sw = await huntStashLoot(doc);
+        if (sw > 0) return '负重 ' + wi.weightPct + '%：存仓 ' + sw + ' 种' + tag;
       }
       // 公会仓库：把鉴定出的 S 装存进去，并取出本职业对口的 S 装穿上（最多 2 分钟一次）
       if (Date.now() - (HUNT.stashAt || 0) > 120000) {
@@ -3932,47 +3949,49 @@ function __RO_BOOT__() {
     return b ? b.p : '';
   }
 
-  // 打开仓库：优先「仓库服务 / 公会仓库」NPC；对话框已开但不是仓库就先关掉再找
+  // 打开仓库：优先「公会仓库」；公会仓库没开通/没权限时退回「个人仓库」（一样能清负重）
+  function dialogButtons(doc) {
+    return Array.prototype.slice.call(doc.querySelectorAll('.npc-dialog-card button, .npc-choice-card button'));
+  }
+
   async function openStorageWindow(doc) {
     if (qSel('.storage-card')) return true;
     if (qSel('.npc-dialog-card')) {
-      var hasRepo = Array.prototype.slice.call(doc.querySelectorAll('.npc-dialog-card button, .npc-choice-card button')).some(function (x) {
+      var hasRepo = dialogButtons(doc).some(function (x) {
         return /仓库/.test(x.textContent) && !x.disabled;
       });
       if (!hasRepo) { await closeDialog(); await sleep(400); }
     }
-    if (!qSel('.npc-dialog-card') && !qSel('.storage-card')) {
-      // 主城的 NPC 名可能是「仓库服务」「公会仓库」等，逐个试；点开可能直接弹仓库窗口
-      var kws = ['仓库服务', '公会仓库', '仓库'];
-      for (var k = 0; k < kws.length; k++) {
-        await casOpenNpc(doc, kws[k], null, { nameOnly: true });
-        await sleep(500);
-        if (qSel('.storage-card')) return true;
-        if (qSel('.npc-dialog-card')) break;
+    var wants = [/公会仓库/, /个人仓库/];
+    for (var w = 0; w < wants.length; w++) {
+      // 上一次尝试失败后服务端会把对话关掉，这里重新点仓库 NPC
+      for (var reopen = 0; reopen < 3 && !qSel('.npc-dialog-card'); reopen++) {
+        var kws = ['仓库服务', '公会仓库', '仓库'];
+        for (var k = 0; k < kws.length && !qSel('.npc-dialog-card'); k++) {
+          await casOpenNpc(doc, kws[k], null, { nameOnly: true });
+          await sleep(500);
+        }
       }
-    }
-    for (var i = 0; i < 4; i++) {
-      var btns = Array.prototype.slice.call(doc.querySelectorAll('.npc-dialog-card button, .npc-choice-card button'));
-      // 优先「公会仓库」，其次任意「仓库」；选中后要点「确认」
-      var b = btns.filter(function (x) { return /公会仓库/.test(x.textContent) && !x.disabled; })[0]
-        || btns.filter(function (x) { return /仓库/.test(x.textContent) && !x.disabled; })[0];
-      if (b) {
-        b.click();
-        await sleep(500);
-        // 选完选项后按钮会重渲染，必须重新查「确认」，不能复用旧节点
-        var okb = Array.prototype.slice.call(doc.querySelectorAll('.npc-choice-card button, .npc-dialog-card button')).filter(function (x) {
-          return /^(确认|确定)$/.test(x.textContent.trim()) && !x.disabled;
-        })[0];
-        if (okb) okb.click();
-        await sleep(1200);
-        break;
+      if (!qSel('.npc-dialog-card')) continue;
+      // 选项列表比对话晚到，先等一会儿
+      for (var wait = 0; wait < 8 && !dialogButtons(doc).length; wait++) await sleep(250);
+      var b = dialogButtons(doc).filter(function (x) { return wants[w].test(x.textContent) && !x.disabled; })[0];
+      if (!b) {
+        if (qSel('.npc-dialog-card')) { await closeDialog(); await sleep(300); }
+        continue;
       }
-      var nx = btns.filter(function (x) { return /下一步|继续|确定|领取/.test(x.textContent) && !x.disabled; })[0];
-      if (!nx) break;
-      nx.click();
-      await sleep(900);
+      b.click();
+      await sleep(600);
+      // 选完选项后按钮会重渲染，必须重新查「确认」，不能复用旧节点
+      var okb = dialogButtons(doc).filter(function (x) {
+        return /^(确认|确定)$/.test(x.textContent.trim()) && !x.disabled;
+      })[0];
+      if (okb) okb.click();
+      // 公会仓库失败时服务端静默关对话、不返回仓库；个人仓库同理，都要轮询着看
+      if (await waitFor(function () { return qSel('.storage-card'); }, 6000, 200)) return true;
+      if (qSel('.npc-dialog-card')) { await closeDialog(); await sleep(300); }
     }
-    return !!(await waitFor(function () { return qSel('.storage-card'); }, 4000, 150));
+    return false;
   }
 
   async function closeStorageWindow(doc) {
@@ -4146,13 +4165,17 @@ function __RO_BOOT__() {
     return names;
   }
 
-  // 背包里的战利品：消耗品/其他/卡片里，除保留名单（翅膀、双补药、放大镜）外的全部
+  // 背包里的战利品：除「装备 / 收藏」外的所有分类（消耗品、其他、卡片、材料…）全部收集，
+  // 只跳过保留名单（翅膀、双补药、放大镜）和未鉴定装备。铝这类重材料就在「其他」里
   async function bagLootNames(doc) {
     var out = [];
-    var tabs = ['消耗品', '其他', '卡片'];
-    for (var i = 0; i < tabs.length; i++) {
+    await ensureInvWindow(doc);
+    var labels = qAll('.inventory-tabs button').map(function (b) { return b.textContent.trim(); })
+      .filter(function (l) { return l && l !== '装备' && l !== '收藏' && l !== '全部'; });
+    if (!labels.length) labels = ['消耗品', '其他', '卡片'];
+    for (var i = 0; i < labels.length; i++) {
       await ensureInvWindow(doc);
-      if (!(await invTab(doc, tabs[i]))) continue;
+      if (!(await invTab(doc, labels[i]))) continue;
       qAll('.inventory-cell').forEach(function (c) {
         var nm = invItemName(c);
         if (!nm || /未鉴定/.test(nm) || stashKeepName(nm)) return;
