@@ -4138,8 +4138,8 @@
     return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
   }
 
-  // 存仓保留名单：留在背包里（翅膀跑图、双补药练级、放大镜鉴定）
-  var STASH_KEEP = ['双补药', '蝴蝶翅膀', '苍蝇翅膀', '放大镜'];
+  // 存仓保留名单：留在背包里（翅膀跑图、双补药练级、放大镜鉴定、箭矢是弹药不能存）
+  var STASH_KEEP = ['双补药', '蝴蝶翅膀', '苍蝇翅膀', '放大镜', '箭矢'];
   function stashKeepName(nm) {
     for (var i = 0; i < STASH_KEEP.length; i++) {
       if (nm.indexOf(STASH_KEEP[i]) >= 0) return true;
