@@ -1402,8 +1402,23 @@
     var p = mapInfo(doc);
     if (p.x == null) return '';
     var dNow = Math.abs(p.x - x) + Math.abs(p.y - y);
-    if (dNow <= 2) { CAS.lastMoveTo = ''; CAS.lastDist = null; CAS.noProg = 0; return 'near'; }
+    if (dNow <= 2) {
+      CAS.lastMoveTo = ''; CAS.lastDist = null; CAS.noProg = 0;
+      CAS.posTgt = ''; CAS.posHist = [];
+      return 'near';
+    }
+    // 刚走开散场（NPC 对话关不掉时）：短时间内别走回原地，否则会在 NPC 旁左右来回
+    if (CAS.awayUntil && Date.now() < CAS.awayUntil && CAS.awayPt
+      && Math.abs(p.x - CAS.awayPt.x) + Math.abs(p.y - CAS.awayPt.y) <= 5) return 'near';
     var tgt = x + ',' + y;
+    // 同一目标下反复回到同一格：被 NPC/障碍挡住左右蹭，不再发移动，交给远程对话
+    var pk = p.x + ',' + p.y;
+    if (CAS.posTgt !== tgt) { CAS.posTgt = tgt; CAS.posHist = []; }
+    CAS.posHist = CAS.posHist || [];
+    CAS.posHist.push(pk);
+    if (CAS.posHist.length > 10) CAS.posHist.shift();
+    var same = CAS.posHist.filter(function (k) { return k === pk; }).length;
+    if (same >= 3 && dNow <= 8) return 'near';
     // 同一条移动指令还在生效时不要重发：每 1.7 秒发一次会不断打断寻路，角色反而原地不动
     if (CAS.lastMoveTo === tgt) {
       if (dNow < (CAS.lastDist == null ? Infinity : CAS.lastDist)) {
@@ -2207,6 +2222,8 @@
         return h ? '回主城准备进挂机区（' + (h === 'warp' ? '传送列表' : '蝴蝶翅膀') + '）' + tag
           : '回不了主城，请手动回 rag_fes' + tag;
       }
+      var wk = await ensureWeapon(doc);
+      if (wk) return wk + tag;                           // 没武器：先补/停，绝不空手出门
       if (await casOpenNpc(doc, '挂机', HUNT_WARP)) { HUNT.entering = true; return '已打开「挂机区」NPC，选新手区传送' + tag; }
       var st = await casStepTo(doc, HUNT_WARP.x, HUNT_WARP.y);
       if (st === 'move') return '走向 (153,165) 点「挂机区」NPC…' + tag;
@@ -3039,13 +3056,37 @@
     qAll('.equipment-slot').forEach(function (el) {
       if (el.classList.contains('equipment-unload-toggle')) return;
       var isEmpty = el.classList.contains('empty');
-      var nm = isEmpty ? '' : (el.getAttribute('title') || '').replace(/^双击卸下/, '').trim();
-      var lab = isEmpty
-        ? (el.getAttribute('title') || '').trim()
-        : ((el.textContent || '').trim().split('[')[0] || '').trim();
+      var nm = isEmpty ? '' : (el.getAttribute('title') || '').replace(/^(双击)?卸下[:：]?\s*/, '').trim();
+      // 部位名必须读 .equipment-slot-label：用 textContent 切 '[' 时，
+      // 没有 [T1] 前缀的装备会把名字并进部位名（「右手短剑」），空槽时就对不上号、穿不回去
+      var labEl = el.querySelector('.equipment-slot-label');
+      var lab = (labEl && labEl.textContent || '').trim();
+      if (!lab) {
+        lab = isEmpty
+          ? (el.getAttribute('title') || '').trim()
+          : ((el.textContent || '').trim().split('[')[0] || '').trim();
+      }
       if (lab) out.push({ lab: lab, name: nm });
     });
     return out;
+  }
+
+  // 某个部位当前穿的装备名；null = 读不到这个部位
+  function wornSlotName(lab) {
+    var hit = null;
+    wornSlots().forEach(function (s) { if (s.lab === lab) hit = s.name || ''; });
+    return hit;
+  }
+
+  // 这件装备是不是「正在穿 / 上次穿在手上」的武器或盾：存仓时必须跳过
+  function isWornWeapon(name) {
+    var n = normName(name);
+    if (!n) return false;
+    var on = wornSlots().some(function (s) { return s.name && normName(s.name) === n; });
+    if (on) return true;
+    return ['右手', '左手'].some(function (k) {
+      return wornSnap[k] && normName(wornSnap[k]) === n;
+    });
   }
 
   function wornByName(name) {
@@ -3263,6 +3304,11 @@
     var y = p.y == null ? SHOP_NPC.y : p.y;
     if (!await casMoveCmd(doc, x, y)) return false;
     await sleep(1600);
+    if (!qSel('.npc-dialog-card')) {
+      // 记下走开的位置：15 秒内别走回这一带，避免「走开→走回→再走开」的左右晃动
+      CAS.awayUntil = Date.now() + 15000;
+      CAS.awayPt = { x: p.x == null ? x : p.x, y: p.y == null ? y : p.y };
+    }
     return !qSel('.npc-dialog-card');
   }
 
@@ -4040,6 +4086,7 @@
       var t = '';
       try { t = advise(scoreRecord(r)).t; } catch (e) { return; }
       if (t !== '建议留') return;                        // 建议卖的已在 huntSellGear 处理
+      if (isWornWeapon(r.name)) return;                  // 正在穿/上次穿在手上的武器、盾不能存
       if (names.indexOf(r.name) < 0) names.push(r.name);
     });
     return names;
@@ -4079,6 +4126,74 @@
     await closeStorageWindow(doc);
     if (qSel('.npc-dialog-card')) await closeDialog();
     return put.length;
+  }
+
+  // 背包（装备页）里按道具详情的「系列」找一把武器（只在完全没有武器记录时用，逐件点开详情）
+  async function findWeaponInBag(doc) {
+    await ensureInvWindow(doc);
+    await invTab(doc, '装备');
+    var weapons = /武器|短剑|长剑|双手剑|剑|匕首|拳刃|斧|钝器|锤|矛|枪|弓|拳套|乐器|琴|鞭|书|杖|镰|风魔|手里剑|榴弹|刀/;
+    var cells = qAll('.inventory-cell').filter(function (c) {
+      return !c.classList.contains('unidentified') && invItemName(c);
+    });
+    for (var i = 0; i < cells.length && i < 15; i++) {
+      var nm = invItemName(cells[i]);
+      var ic = cells[i].querySelector('.item-icon');
+      if (!ic || !nm) continue;
+      ic.click();
+      var det = await waitDetail(doc, nm);
+      if (!det) continue;
+      var ser = '';
+      try { ser = parseDetail(det).series || ''; } catch (e) {}
+      closeDetail(det);
+      await sleep(120);
+      if (ser && weapons.test(ser)) return nm;
+    }
+    return '';
+  }
+
+  // 出门前确认右手有武器：被卸下还没穿回时，从背包/公会仓库找回来；实在没有就停狩猎，别空手出门
+  async function ensureWeapon(doc) {
+    if (!qSel('.equipment-slot')) return '';
+    var cur = wornSlotName('右手');
+    if (cur === null || cur) return '';
+    if (Date.now() - (HUNT.weaponAt || 0) < 12000) return '正在补武器…';
+    HUNT.weaponAt = Date.now();
+
+    var want = wornSnap['右手'] || '';
+    await ensureInvWindow(doc);
+    await invTab(doc, '装备');
+    if (want && await wearFromBag(want) && wornSlotName('右手')) {
+      return '右手空着，已把「' + want + '」穿回';
+    }
+    // 连上次穿的名字都没有（刷新过页面）：按「系列」在背包里找一把武器
+    var found = want ? '' : await findWeaponInBag(doc);
+    if (found) {
+      await invTab(doc, '装备');
+      await wearFromBag(found);
+      if (wornSlotName('右手')) {
+        wornSnap['右手'] = found;
+        return '右手空着，已从背包穿上武器「' + found + '」';
+      }
+    }
+    // 背包里没有：试着从公会仓库取回上次那把
+    if (want && await openStorageWindow(doc)) {
+      var got = await withdrawNames(doc, [want]);
+      await closeStorageWindow(doc);
+      if (qSel('.npc-dialog-card')) await closeDialog();
+      if (got.length) {
+        await invTab(doc, '装备');
+        if (await wearFromBag(want) && wornSlotName('右手')) {
+          return '右手空着，已从仓库取回「' + want + '」穿上';
+        }
+      }
+    }
+    HUNT.on = false;
+    setHuntBtn(false);
+    HUNT.stopMsg = '右手没有武器（背包/公会仓库也找不到' + (want ? '「' + want + '」' : '上次的武器')
+      + '），已停止狩猎：请先手动装备武器再点「狩猎任务」';
+    try { localStorage.removeItem('ro-hunt-autoresume'); } catch (e) {}
+    return HUNT.stopMsg;
   }
 
   // 小号交完狩猎任务后：每天一次，把材料 + 评级 S 装备全存公会仓库
@@ -4175,7 +4290,10 @@
     var job = myJobBucket(doc);
     var sRecs = sRecords();
     var pending = [];
-    sRecs.forEach(function (r) { if (!r.stored && pending.indexOf(r.name) < 0) pending.push(r.name); });
+    sRecs.forEach(function (r) {
+      if (r.stored || isWornWeapon(r.name)) return;      // 手上/备用的武器、盾不存
+      if (pending.indexOf(r.name) < 0) pending.push(r.name);
+    });
     // 非 S 但判定「建议留」的装备也要存；消耗品/其他/卡片除保留名单外全存
     keepGearNames().forEach(function (n) { if (pending.indexOf(n) < 0) pending.push(n); });
     var loot = await bagLootNames(doc);
