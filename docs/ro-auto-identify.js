@@ -5146,6 +5146,20 @@ function __RO_BOOT__() {
     var head = document.createElement('div');
     head.className = 'ah';
     head.textContent = '当前在线 ' + on.length + ' 个 · 清单 ' + accounts.length + ' 个角色';
+    if (accounts.length) {
+      var clr = document.createElement('button');
+      clr.className = 'ghost';
+      clr.textContent = '清空历史';
+      clr.style.marginLeft = 'auto';
+      clr.addEventListener('click', function () {
+        if (!confirm('确定清空账号历史清单（' + accounts.length + ' 条）？不影响游戏里的账号配置。')) return;
+        accounts = [];
+        saveAccounts();
+        renderAccounts();
+        setStatus('账号历史清单已清空');
+      });
+      head.appendChild(clr);
+    }
     box.appendChild(head);
 
     if (!on.length) {

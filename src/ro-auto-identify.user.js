@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         北境之地 RO · 自动鉴定
 // @namespace    ro-auto-identify
-// @version      1.8.92
+// @version      1.8.93
 // @description  自动鉴定未鉴定装备，标词条价值、算总分、给留卖建议，可自动补放大镜、自动卖建议卖的装备
 // @match        http://103.45.135.247:3000/*
 // @run-at       document-idle
@@ -5153,6 +5153,20 @@
     var head = document.createElement('div');
     head.className = 'ah';
     head.textContent = '当前在线 ' + on.length + ' 个 · 清单 ' + accounts.length + ' 个角色';
+    if (accounts.length) {
+      var clr = document.createElement('button');
+      clr.className = 'ghost';
+      clr.textContent = '清空历史';
+      clr.style.marginLeft = 'auto';
+      clr.addEventListener('click', function () {
+        if (!confirm('确定清空账号历史清单（' + accounts.length + ' 条）？不影响游戏里的账号配置。')) return;
+        accounts = [];
+        saveAccounts();
+        renderAccounts();
+        setStatus('账号历史清单已清空');
+      });
+      head.appendChild(clr);
+    }
     box.appendChild(head);
 
     if (!on.length) {
