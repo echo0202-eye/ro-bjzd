@@ -4052,6 +4052,7 @@ function __RO_BOOT__() {
   // side: bag=背包（存） box=仓库（取）；优先点「全部」，没有就点单个「存入/取出」
   async function storageTransfer(doc, side, names, btnRe) {
     var done = [];
+    var fails = {};   // 存不进去的道具（服务端会拒绝并弹提示框）：连续两次没动就跳过，避免反复点卡死
     storageDiag = { rows: 0, tabs: 0 };
     var tabs = ['装备', '消耗品', '其他', '卡片'];
     for (var t = 0; t < tabs.length; t++) {
@@ -4069,7 +4070,7 @@ function __RO_BOOT__() {
           var nm = storageRowName(rows[i]);
           if (!nm) continue;
           var k = storageMatch(names, nm);
-          if (!k) continue;
+          if (!k || (fails[k] || 0) >= 2) continue;
           // 「全部」按钮点下去就是一次存档请求（数量=该行全部），不需要再点「存入」
           var btn = rows[i].querySelector('button.storage-all')
             || Array.prototype.slice.call(rows[i].querySelectorAll('button')).filter(function (b) {
@@ -4082,7 +4083,17 @@ function __RO_BOOT__() {
         if (!hit) break;
         hit.click();
         await sleep(700);
-        if (done.indexOf(hitName) < 0) done.push(hitName);
+        clearNotice(doc);   // 存不进去时服务端弹的提示框会挡住后续点击
+        var nowSec = storageCols(doc)[side];
+        var still = nowSec ? Array.prototype.slice.call(nowSec.querySelectorAll('.storage-transfer-list > div')).some(function (r) {
+          var n2 = storageRowName(r);
+          return n2 && storageMatch(names, n2) === hitName;
+        }) : false;
+        if (still) {
+          fails[hitName] = (fails[hitName] || 0) + 1;
+        } else if (done.indexOf(hitName) < 0) {
+          done.push(hitName);
+        }
       }
     }
     return done;
@@ -4140,8 +4151,8 @@ function __RO_BOOT__() {
     return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
   }
 
-  // 存仓保留名单：留在背包里（翅膀跑图、双补药练级、放大镜鉴定、箭矢是弹药、门票要随手用）
-  var STASH_KEEP = ['双补药', '蝴蝶翅膀', '苍蝇翅膀', '放大镜', '箭矢', '道场门票'];
+  // 存仓保留名单：留在背包里（翅膀跑图、双补药练级、放大镜鉴定、箭矢是弹药、门票要随手用、经验书要自己吃）
+  var STASH_KEEP = ['双补药', '蝴蝶翅膀', '苍蝇翅膀', '放大镜', '箭矢', '道场门票', '经验书'];
   function stashKeepName(nm) {
     for (var i = 0; i < STASH_KEEP.length; i++) {
       if (nm.indexOf(STASH_KEEP[i]) >= 0) return true;
