@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         北境之地 RO · 自动鉴定
 // @namespace    ro-auto-identify
-// @version      1.8.91
+// @version      1.8.92
 // @description  自动鉴定未鉴定装备，标词条价值、算总分、给留卖建议，可自动补放大镜、自动卖建议卖的装备
 // @match        http://103.45.135.247:3000/*
 // @run-at       document-idle
@@ -4675,7 +4675,7 @@
     '  <div class="casbar" id="casbar" style="display:none"><span class="tlabel">起号进度</span><b id="cas-progress">转生 0/5</b><button class="ghost" id="cas-check">查转数</button><button class="ghost" id="cas-reset">重置</button></div>',
     '  <div class="casbar" id="wildbar" style="display:none"><span class="tlabel">野外BOSS</span><b id="wild-info">第 1 轮 · 活力约 100% · 本轮 0 只 · 累计 0</b><input id="wild-key" placeholder="地图关键词（可选）" /></div>',
     '  <div class="casbar" id="craftbar" style="display:none"><span class="tlabel">影装</span><b id="craft-info">影碎片 —（点「影装」扫描）</b></div>',
-    '  <div class="casbar" id="layoutbar" style="display:none"><span class="tlabel">布局来源</span><input id="layout-src" value="明知山" placeholder="账号名" /><button class="ghost" id="layout-go">套用到其他账号</button></div>',
+    '  <div class="casbar" id="layoutbar" style="display:none"><span class="tlabel">布局来源</span><input id="layout-src" value="明知山" placeholder="账号名或角色名" /><button class="ghost" id="layout-go">套用到其他账号</button></div>',
     '  <div class="status" id="status">就绪，点「开始鉴定」</div>',
     '  <div class="taskbar" id="taskbar" style="display:none">',
     '    <div class="tb-hd"><span class="tlabel">任务进度</span><span class="tb-ago" id="task-ago"></span></div>',
@@ -6282,6 +6282,62 @@
   function normAccountName(s) {
     return String(s || '').trim().replace(/_[mMfF]$/, '').toLowerCase();
   }
+  function readAccounts() {
+    try {
+      var cfg = JSON.parse(localStorage.getItem('rathena-multi-accounts:v1') || '{}');
+      return Array.isArray(cfg.accounts) ? cfg.accounts : [];
+    } catch (e) { return []; }
+  }
+  // 顶层页面里各账号 iframe：按角色名找 account-frame id
+  function accountIdByCharName(name) {
+    var n = normAccountName(name);
+    if (!n) return '';
+    try {
+      var frames = Array.prototype.slice.call(window.top.document.querySelectorAll('iframe'));
+      for (var i = 0; i < frames.length; i++) {
+        var d = null;
+        try { d = frames[i].contentDocument; } catch (e) { continue; }
+        if (!d || normAccountName(charNameOf(d)) !== n) continue;
+        var m = String(frames[i].src || '').match(/account-frame=([^&]+)/);
+        if (m) return decodeURIComponent(m[1]);
+      }
+    } catch (e) {}
+    return '';
+  }
+  // 输入可以是账号名，也可以是角色名
+  function resolveAccount(name, accounts, owners) {
+    var n = normAccountName(name);
+    if (!n) return '';
+    for (var i = 0; i < owners.length; i++) {
+      var o = owners[i];
+      try { o = decodeURIComponent(o); } catch (e) {}
+      if (normAccountName(o) === n) return normAccountName(o);
+    }
+    for (var j = 0; j < accounts.length; j++) {
+      if (accounts[j] && normAccountName(accounts[j].username) === n) return n;
+    }
+    for (var k = 0; k < accounts.length; k++) {
+      var a = accounts[k] || {};
+      if (a.username && normAccountName(a.lastCharacterName) === n) return normAccountName(a.username);
+    }
+    // 角色名 → 正在开着的 iframe → 对应账号
+    var id = accountIdByCharName(name);
+    if (id) {
+      for (var m = 0; m < accounts.length; m++) {
+        if (accounts[m] && accounts[m].id === id) return normAccountName(accounts[m].username);
+      }
+    }
+    return '';
+  }
+  function ownerLabel(raw, accounts) {
+    var n = raw;
+    try { n = decodeURIComponent(raw); } catch (e) {}
+    for (var i = 0; i < accounts.length; i++) {
+      var a = accounts[i] || {};
+      if (normAccountName(a.username) === n && a.lastCharacterName) return n + '（' + a.lastCharacterName + '）';
+    }
+    return n;
+  }
   // 复制账号布局；返回 {ok, msg, done[], keys}
   function copyWindowLayout(srcName) {
     var LAYOUT_KEYS = [
@@ -6291,9 +6347,8 @@
       'rathena-social-layout-v1',
       'rathena-party-layout-v2'
     ];
-    var src = normAccountName(srcName);
-    var suffix = ':' + encodeURIComponent(src);
-    var data = {}, owners = [];
+    var accounts = readAccounts();
+    var byOwner = {}, owners = [];
     try {
       for (var i = 0; i < localStorage.length; i++) {
         var k = localStorage.key(i) || '';
@@ -6303,31 +6358,37 @@
         }
         if (!hit) continue;
         var who = k.slice(hit.length + 1);
-        if (owners.indexOf(who) < 0) owners.push(who);
-        if (k.slice(-suffix.length) === suffix) data[hit] = localStorage.getItem(k);
+        if (!byOwner[who]) { byOwner[who] = {}; owners.push(who); }
+        byOwner[who][hit] = localStorage.getItem(k);
       }
     } catch (e) { return { ok: false, msg: '读取布局失败：' + e.message }; }
-    var keys = Object.keys(data);
-    if (!keys.length) {
-      var names = owners.map(function (n) { try { return decodeURIComponent(n); } catch (e) { return n; } });
-      return { ok: false, msg: '本机没有「' + srcName + '」的布局' + (names.length ? '；有布局的账号：' + names.join('、') : '（该账号要先登录过）') };
+
+    var src = resolveAccount(srcName, accounts, owners);
+    if (!src) {
+      var names = owners.map(function (n) { return ownerLabel(n, accounts); });
+      return { ok: false, msg: '没有「' + srcName + '」的布局' + (names.length ? '；可选：' + names.join('、') : '（该账号要先登录过）') };
     }
+    var srcKey = '';
+    for (var s = 0; s < owners.length; s++) {
+      var ow = owners[s];
+      try { ow = decodeURIComponent(ow); } catch (e) {}
+      if (normAccountName(ow) === src) { srcKey = owners[s]; break; }
+    }
+    var data = (srcKey && byOwner[srcKey]) || {};
+    var keys = Object.keys(data);
+    if (!keys.length) return { ok: false, msg: '账号「' + src + '」还没存过布局（登录后调整一下窗口再试）' };
 
     // 目标账号：游戏多开配置里的账号名（与游戏自己写布局用的名字一致）
     var targets = [];
-    try {
-      var cfg = JSON.parse(localStorage.getItem('rathena-multi-accounts:v1') || '{}');
-      (cfg.accounts || []).forEach(function (a) {
-        var n = normAccountName(a && a.username);
-        if (n && n !== src && targets.indexOf(n) < 0) targets.push(n);
-      });
-    } catch (e) {}
+    accounts.forEach(function (a) {
+      var n = normAccountName(a && a.username);
+      if (n && n !== src && targets.indexOf(n) < 0) targets.push(n);
+    });
     if (!targets.length) {
-      // 兜底：多开配置读不到时，直接套给本机已有布局的其他账号
       owners.forEach(function (raw) {
         var n = raw;
         try { n = decodeURIComponent(raw); } catch (e) {}
-        if (n && n !== src && targets.indexOf(n) < 0) targets.push(n);
+        if (n && normAccountName(n) !== src && targets.indexOf(normAccountName(n)) < 0) targets.push(normAccountName(n));
       });
     }
     if (!targets.length) return { ok: false, msg: '没找到可套用的其他账号（多开列表为空）' };
