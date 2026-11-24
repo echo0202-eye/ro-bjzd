@@ -3266,7 +3266,7 @@
     var dlg = qSel('.npc-dialog-card');
     if (!dlg) return;
     var b = Array.prototype.slice.call(dlg.querySelectorAll('button')).filter(function (x) {
-      return /^(关闭|取消|结束交易)$/.test(x.textContent.trim()) && !x.disabled;
+      return /^(关闭|取消|结束交易|结束异常对话)$/.test(x.textContent.trim()) && !x.disabled;
     })[0];
     // 队伍/社交等卡片只有一个「×」关闭键（class=modal-close），没有文字，必须单独认
     if (!b) b = dlg.querySelector('button.modal-close:not([disabled])');
