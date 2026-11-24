@@ -3291,7 +3291,20 @@
     })[0];
     // 队伍/社交等卡片只有一个「×」关闭键（class=modal-close），没有文字，必须单独认
     if (!b) b = dlg.querySelector('button.modal-close:not([disabled])');
-    if (b) { b.click(); await sleep(500); return; }
+    if (b) {
+      // 有些「对话等待时间已结束」的窗口只认指针事件，.click() 点了没反应，用完整事件序列补一遍
+      tapEl(b);
+      await sleep(500);
+      if (qSel('.npc-dialog-card')) {   // 还开着：再补一个 Esc
+        try {
+          var esc = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true });
+          qSel('.npc-dialog-card').dispatchEvent(esc);
+          document.dispatchEvent(esc);
+        } catch (e) {}
+        await sleep(300);
+      }
+      return;
+    }
     // 狩猎任务进度页只有「下一步」：进操作页选「关闭」→ 确认 → 关闭（绝不碰「放弃任务」）
     if (!/狩猎/.test(dlg.textContent)) return;
     var next = Array.prototype.slice.call(dlg.querySelectorAll('button')).filter(function (x) {
@@ -3314,7 +3327,7 @@
     var cb = fin && Array.prototype.slice.call(fin.querySelectorAll('button')).filter(function (x) {
       return x.textContent.trim() === '关闭' && !x.disabled;
     })[0];
-    if (cb) { cb.click(); await sleep(400); }
+    if (cb) { tapEl(cb); await sleep(400); }
   }
 
   // 游戏的「购买失败 / 余额不足」等提示框（.service-notice-layer）会挡住移动和换装，
