@@ -4668,6 +4668,7 @@ function __RO_BOOT__() {
     '  <div class="casbar" id="casbar" style="display:none"><span class="tlabel">起号进度</span><b id="cas-progress">转生 0/5</b><button class="ghost" id="cas-check">查转数</button><button class="ghost" id="cas-reset">重置</button></div>',
     '  <div class="casbar" id="wildbar" style="display:none"><span class="tlabel">野外BOSS</span><b id="wild-info">第 1 轮 · 活力约 100% · 本轮 0 只 · 累计 0</b><input id="wild-key" placeholder="地图关键词（可选）" /></div>',
     '  <div class="casbar" id="craftbar" style="display:none"><span class="tlabel">影装</span><b id="craft-info">影碎片 —（点「影装」扫描）</b></div>',
+    '  <div class="casbar" id="layoutbar" style="display:none"><span class="tlabel">布局来源</span><input id="layout-src" value="明知山" placeholder="账号名" /><button class="ghost" id="layout-go">套用到其他账号</button></div>',
     '  <div class="status" id="status">就绪，点「开始鉴定」</div>',
     '  <div class="taskbar" id="taskbar" style="display:none">',
     '    <div class="tb-hd"><span class="tlabel">任务进度</span><span class="tb-ago" id="task-ago"></span></div>',
@@ -6251,8 +6252,18 @@ function __RO_BOOT__() {
   // 套用布局：把源账号的浮动窗口布局（位置/大小/吸附关系）复制到其他账号
   // 游戏按「登录账号名」分别存 localStorage：rathena-game-window-layout-v17:<账号名>
   $('layoutbtn').addEventListener('click', function () {
-    var src = String(window.prompt('把哪个账号的窗口布局套用到其他账号？', '明知山') || '').trim();
-    if (!src) return;
+    var bar = $('layoutbar');
+    var show = bar.style.display === 'none';
+    bar.style.display = show ? 'flex' : 'none';
+    if (show) {
+      var el = $('layout-src');
+      if (el) { try { el.focus(); el.select(); } catch (e) {} }
+    }
+  });
+  $('layout-go').addEventListener('click', function () {
+    var el = $('layout-src');
+    var src = ((el && el.value) || '').trim();
+    if (!src) { setStatus('套用布局：先填源账号名'); return; }
     var r = copyWindowLayout(src);
     if (!r.ok) { setStatus('套用布局：' + r.msg); return; }
     if (!r.done.length) { setStatus('套用布局：没有可套用的其他账号（' + r.msg + '）'); return; }
@@ -6304,7 +6315,15 @@ function __RO_BOOT__() {
         if (n && n !== src && targets.indexOf(n) < 0) targets.push(n);
       });
     } catch (e) {}
-    if (!targets.length) return { ok: false, msg: '没读到多开账号列表（' + owners.length + ' 个账号有布局）' };
+    if (!targets.length) {
+      // 兜底：多开配置读不到时，直接套给本机已有布局的其他账号
+      owners.forEach(function (raw) {
+        var n = raw;
+        try { n = decodeURIComponent(raw); } catch (e) {}
+        if (n && n !== src && targets.indexOf(n) < 0) targets.push(n);
+      });
+    }
+    if (!targets.length) return { ok: false, msg: '没找到可套用的其他账号（多开列表为空）' };
 
     var done = [], fail = [];
     targets.forEach(function (n) {
