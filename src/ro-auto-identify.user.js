@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         北境之地 RO · 自动鉴定
 // @namespace    ro-auto-identify
-// @version      1.8.94
+// @version      1.8.102
 // @description  自动鉴定未鉴定装备，标词条价值、算总分、给留卖建议，可自动补放大镜、自动卖建议卖的装备
 // @match        http://103.45.135.247:3000/*
 // @run-at       document-idle
@@ -886,6 +886,13 @@
     // 血量：rail 里是「HP9657/10321SP741/1557」
     var vTxt = (s.querySelector('.rail-vitals') || {}).textContent || '';
     var vhp = vTxt.replace(/\s+/g, '').match(/HP([\d,]+)\/([\d,]+)/i);
+    // 负重：rail 里是「负重2760.9 / 4830.0 (57%)」
+    var wEl = facts.filter(function (x) {
+      var dt = x.querySelector('dt');
+      return dt && dt.textContent.indexOf('负重') >= 0;
+    })[0];
+    var wTxt = (wEl && wEl.querySelector('dd')) ? wEl.querySelector('dd').textContent.replace(/,/g, '') : '';
+    var wm = wTxt.match(/([\d.]+)\s*\/\s*([\d.]+)/);
     return {
       baseMax: !!base.max,
       jobMax: !!job.max,
@@ -901,6 +908,9 @@
       zeny: zm ? parseInt(zm[1].replace(/,/g, ''), 10) : 0,
       hp: vhp ? parseInt(vhp[1].replace(/,/g, ''), 10) : 0,
       hpMax: vhp ? parseInt(vhp[2].replace(/,/g, ''), 10) : 0,
+      weight: wm ? parseFloat(wm[1]) : null,
+      weightMax: wm ? parseFloat(wm[2]) : null,
+      weightPct: wm ? Math.round(parseFloat(wm[1]) / parseFloat(wm[2]) * 100) : null,
       idleSec: idleSec
     };
   }
@@ -970,8 +980,10 @@
     })[0] || null;
   }
 
-  async function casOpenNpc(doc, keyword, coord) {
+  async function casOpenNpc(doc, keyword, coord, opts) {
     var tgt = coord === undefined ? CAS_NPC : coord;
+    // nameOnly：名字对不上就放弃，不要按坐标兜底（否则会点到旁边不相干的 NPC）
+    if (opts && opts.nameOnly) tgt = null;
     var tab = entityTab(doc, 'NPC');
     if (tab && !tab.classList.contains('active')) { tab.click(); await sleep(400); }
     // 实体列表是异步拉的：最多等 3 秒，别读一次空列表就放弃
@@ -1408,11 +1420,39 @@
 
   // 小步走向目标（只发一次 #web:move，短等待），用于回城后 NPC 还没进视野时靠近
   async function casStepTo(doc, x, y) {
+    // 目标正好是 NPC 站的那一格：改走旁边一格。服务端会围着被占的格子反复绕，
+    // 表现就是「在 NPC 左右晃」；远程对话本来也不需要贴身。
+    var npcs = [SHOP_NPC, HUNT_WARP, CAS_NPC, WILD_NPC, CRAFT_NPC];
+    for (var ni = 0; ni < npcs.length; ni++) {
+      var n0 = npcs[ni];
+      if (n0 && n0.x === x && n0.y === y) { x = x - 1; break; }
+    }
     var p = mapInfo(doc);
     if (p.x == null) return '';
     var dNow = Math.abs(p.x - x) + Math.abs(p.y - y);
-    if (dNow <= 2) { CAS.lastMoveTo = ''; CAS.lastDist = null; CAS.noProg = 0; return 'near'; }
+    if (dNow <= 2) {
+      CAS.lastMoveTo = ''; CAS.lastDist = null; CAS.noProg = 0;
+      CAS.posTgt = ''; CAS.posHist = [];
+      return 'near';
+    }
+    // 刚走开散场（NPC 对话关不掉时）：短时间内别走回原地，否则会在 NPC 旁左右来回
+    if (CAS.awayUntil && Date.now() < CAS.awayUntil && CAS.awayPt
+      && Math.abs(p.x - CAS.awayPt.x) + Math.abs(p.y - CAS.awayPt.y) <= 5) return 'near';
     var tgt = x + ',' + y;
+    // 同一目标下反复回到同一格：被 NPC/障碍挡住左右蹭，不再发移动，交给远程对话
+    var pk = p.x + ',' + p.y;
+    if (CAS.posTgt !== tgt) { CAS.posTgt = tgt; CAS.posHist = []; }
+    CAS.posHist = CAS.posHist || [];
+    CAS.posHist.push(pk);
+    if (CAS.posHist.length > 10) CAS.posHist.shift();
+    var same = CAS.posHist.filter(function (k) { return k === pk; }).length;
+    if (same >= 3 && dNow <= 8) return 'near';
+    // 在相邻两格之间来回蹭（寻路绕 NPC）：也当作已到位
+    if (CAS.posHist.length >= 6 && dNow <= 8) {
+      var uniq = {};
+      CAS.posHist.slice(-6).forEach(function (k) { uniq[k] = 1; });
+      if (Object.keys(uniq).length <= 2) return 'near';
+    }
     // 同一条移动指令还在生效时不要重发：每 1.7 秒发一次会不断打断寻路，角色反而原地不动
     if (CAS.lastMoveTo === tgt) {
       if (dNow < (CAS.lastDist == null ? Infinity : CAS.lastDist)) {
@@ -1929,6 +1969,12 @@
     var pos = mapInfo(doc);
     var tag = ' · ' + (pos.map || '?');
 
+    // 购买失败/提示类弹窗会拦住移动和换装：点掉再继续
+    if (clearNotice(doc)) {
+      await sleep(500);
+      return '已关闭游戏提示框' + tag;
+    }
+
     // 角色倒下：先点「返回城镇」复活，否则后面所有交互都会被拦
     var dead = Array.prototype.slice.call(doc.querySelectorAll('button')).filter(function (b) {
       return visible(b) && !b.disabled && /返回城镇/.test(b.textContent);
@@ -1951,6 +1997,13 @@
         HUNT.sellAt = Date.now();
         var sj = await huntSellJunk(doc);
         if (sj) return '回城卖装备：' + sj + tag;
+      }
+      // 负重过半就先把铝这类材料/战利品存仓库，否则买东西时一直提示「负重不足」
+      var wi = railInfo(doc);
+      if (wi && wi.weightPct != null && wi.weightPct >= 70 && Date.now() - (HUNT.stashWAt || 0) > 60000) {
+        HUNT.stashWAt = Date.now();
+        var sw = await huntStashLoot(doc);
+        if (sw > 0) return '负重 ' + wi.weightPct + '%：存仓 ' + sw + ' 种' + tag;
       }
       // 公会仓库：把鉴定出的 S 装存进去，并取出本职业对口的 S 装穿上（最多 2 分钟一次）
       if (Date.now() - (HUNT.stashAt || 0) > 120000) {
@@ -2173,6 +2226,8 @@
 
   // 任务区 → 只留目标怪的排除列表 → 开始挂机
   async function huntFarm(doc, pos, targets, prog, tag) {
+    // 购买失败之类的游戏提示框会挡住移动/换装：先点掉，本 tick 直接返回，下一轮再走
+    if (clearNotice(doc)) return '已关闭游戏提示框' + tag;
     // 血量低且背包没药：先回城补给；在城里还补不上就别再出去送死
     // （有药时交给游戏挂机的自动喝药，不在这里反复回城）
     var ri = railInfo(doc);
@@ -2216,6 +2271,8 @@
         return h ? '回主城准备进挂机区（' + (h === 'warp' ? '传送列表' : '蝴蝶翅膀') + '）' + tag
           : '回不了主城，请手动回 rag_fes' + tag;
       }
+      var wk = await ensureWeapon(doc);
+      if (wk) return wk + tag;                           // 没武器：先补/停，绝不空手出门
       if (await casOpenNpc(doc, '挂机', HUNT_WARP)) { HUNT.entering = true; return '已打开「挂机区」NPC，选新手区传送' + tag; }
       var st = await casStepTo(doc, HUNT_WARP.x, HUNT_WARP.y);
       if (st === 'move') return '走向 (153,165) 点「挂机区」NPC…' + tag;
@@ -3048,13 +3105,37 @@
     qAll('.equipment-slot').forEach(function (el) {
       if (el.classList.contains('equipment-unload-toggle')) return;
       var isEmpty = el.classList.contains('empty');
-      var nm = isEmpty ? '' : (el.getAttribute('title') || '').replace(/^双击卸下/, '').trim();
-      var lab = isEmpty
-        ? (el.getAttribute('title') || '').trim()
-        : ((el.textContent || '').trim().split('[')[0] || '').trim();
+      var nm = isEmpty ? '' : (el.getAttribute('title') || '').replace(/^(双击)?卸下[:：]?\s*/, '').trim();
+      // 部位名必须读 .equipment-slot-label：用 textContent 切 '[' 时，
+      // 没有 [T1] 前缀的装备会把名字并进部位名（「右手短剑」），空槽时就对不上号、穿不回去
+      var labEl = el.querySelector('.equipment-slot-label');
+      var lab = (labEl && labEl.textContent || '').trim();
+      if (!lab) {
+        lab = isEmpty
+          ? (el.getAttribute('title') || '').trim()
+          : ((el.textContent || '').trim().split('[')[0] || '').trim();
+      }
       if (lab) out.push({ lab: lab, name: nm });
     });
     return out;
+  }
+
+  // 某个部位当前穿的装备名；null = 读不到这个部位
+  function wornSlotName(lab) {
+    var hit = null;
+    wornSlots().forEach(function (s) { if (s.lab === lab) hit = s.name || ''; });
+    return hit;
+  }
+
+  // 这件装备是不是「正在穿 / 上次穿在手上」的武器或盾：存仓时必须跳过
+  function isWornWeapon(name) {
+    var n = normName(name);
+    if (!n) return false;
+    var on = wornSlots().some(function (s) { return s.name && normName(s.name) === n; });
+    if (on) return true;
+    return ['右手', '左手'].some(function (k) {
+      return wornSnap[k] && normName(wornSnap[k]) === n;
+    });
   }
 
   function wornByName(name) {
@@ -3234,11 +3315,24 @@
     var dlg = qSel('.npc-dialog-card');
     if (!dlg) return;
     var b = Array.prototype.slice.call(dlg.querySelectorAll('button')).filter(function (x) {
-      return /^(关闭|取消|结束交易)$/.test(x.textContent.trim()) && !x.disabled;
+      return /^(关闭|取消|结束交易|结束异常对话)$/.test(x.textContent.trim()) && !x.disabled;
     })[0];
     // 队伍/社交等卡片只有一个「×」关闭键（class=modal-close），没有文字，必须单独认
     if (!b) b = dlg.querySelector('button.modal-close:not([disabled])');
-    if (b) { b.click(); await sleep(500); return; }
+    if (b) {
+      // 有些「对话等待时间已结束」的窗口只认指针事件，.click() 点了没反应，用完整事件序列补一遍
+      tapEl(b);
+      await sleep(500);
+      if (qSel('.npc-dialog-card')) {   // 还开着：再补一个 Esc
+        try {
+          var esc = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true });
+          qSel('.npc-dialog-card').dispatchEvent(esc);
+          document.dispatchEvent(esc);
+        } catch (e) {}
+        await sleep(300);
+      }
+      return;
+    }
     // 狩猎任务进度页只有「下一步」：进操作页选「关闭」→ 确认 → 关闭（绝不碰「放弃任务」）
     if (!/狩猎/.test(dlg.textContent)) return;
     var next = Array.prototype.slice.call(dlg.querySelectorAll('button')).filter(function (x) {
@@ -3261,7 +3355,19 @@
     var cb = fin && Array.prototype.slice.call(fin.querySelectorAll('button')).filter(function (x) {
       return x.textContent.trim() === '关闭' && !x.disabled;
     })[0];
-    if (cb) { cb.click(); await sleep(400); }
+    if (cb) { tapEl(cb); await sleep(400); }
+  }
+
+  // 游戏的「购买失败 / 余额不足」等提示框（.service-notice-layer）会挡住移动和换装，
+  // 必须先点「确定」关掉，否则角色会一直原地打转
+  function clearNotice(doc) {
+    var n = doc.querySelector('.service-notice-layer');
+    if (!n) return false;
+    var b = Array.prototype.slice.call(n.querySelectorAll('button')).filter(function (x) {
+      return /确定|知道了|关闭|确认/.test(x.textContent);
+    })[0] || n.querySelector('button');
+    if (b && !b.disabled) b.click();
+    return true;
   }
 
   // 商店类对话没有关闭按钮，点空白也不会关；走开一步才会散场
@@ -3272,6 +3378,11 @@
     var y = p.y == null ? SHOP_NPC.y : p.y;
     if (!await casMoveCmd(doc, x, y)) return false;
     await sleep(1600);
+    if (!qSel('.npc-dialog-card')) {
+      // 记下走开的位置：15 秒内别走回这一带，避免「走开→走回→再走开」的左右晃动
+      CAS.awayUntil = Date.now() + 15000;
+      CAS.awayPt = { x: p.x == null ? x : p.x, y: p.y == null ? y : p.y };
+    }
     return !qSel('.npc-dialog-card');
   }
 
@@ -3562,8 +3673,12 @@
     var want = page === '出售道具' ? 'shop_sell' : 'shop_buy';
     if (shopAction(doc) === want) return true;
     if (!qSel('.npc-dialog-card')) {
-      await casStepTo(doc, SHOP_NPC.x, SHOP_NPC.y);
-      if (!(await casOpenNpc(doc, '消耗品售卖机', SHOP_NPC))) return false;
+      // NPC 列表里点一下就是远程对话，不用走到旁边；走不到才小步靠近。
+      // （以前无条件先走过去，散场再走回来，看起来就是在 NPC 旁边左右晃）
+      if (!(await casOpenNpc(doc, '消耗品售卖机', SHOP_NPC))) {
+        await casStepTo(doc, SHOP_NPC.x, SHOP_NPC.y);
+        if (!(await casOpenNpc(doc, '消耗品售卖机', SHOP_NPC))) return false;
+      }
       await sleep(600);
     }
     if (shopAction(doc) === 'shop') {
@@ -3841,47 +3956,49 @@
     return b ? b.p : '';
   }
 
-  // 打开仓库：优先「仓库服务 / 公会仓库」NPC；对话框已开但不是仓库就先关掉再找
+  // 打开仓库：优先「公会仓库」；公会仓库没开通/没权限时退回「个人仓库」（一样能清负重）
+  function dialogButtons(doc) {
+    return Array.prototype.slice.call(doc.querySelectorAll('.npc-dialog-card button, .npc-choice-card button'));
+  }
+
   async function openStorageWindow(doc) {
     if (qSel('.storage-card')) return true;
     if (qSel('.npc-dialog-card')) {
-      var hasRepo = Array.prototype.slice.call(doc.querySelectorAll('.npc-dialog-card button, .npc-choice-card button')).some(function (x) {
+      var hasRepo = dialogButtons(doc).some(function (x) {
         return /仓库/.test(x.textContent) && !x.disabled;
       });
       if (!hasRepo) { await closeDialog(); await sleep(400); }
     }
-    if (!qSel('.npc-dialog-card') && !qSel('.storage-card')) {
-      // 主城的 NPC 名可能是「仓库服务」「公会仓库」等，逐个试；点开可能直接弹仓库窗口
-      var kws = ['仓库服务', '公会仓库', '仓库'];
-      for (var k = 0; k < kws.length; k++) {
-        await casOpenNpc(doc, kws[k]);
-        await sleep(500);
-        if (qSel('.storage-card')) return true;
-        if (qSel('.npc-dialog-card')) break;
+    var wants = [/公会仓库/, /个人仓库/];
+    for (var w = 0; w < wants.length; w++) {
+      // 上一次尝试失败后服务端会把对话关掉，这里重新点仓库 NPC
+      for (var reopen = 0; reopen < 3 && !qSel('.npc-dialog-card'); reopen++) {
+        var kws = ['仓库服务', '公会仓库', '仓库'];
+        for (var k = 0; k < kws.length && !qSel('.npc-dialog-card'); k++) {
+          await casOpenNpc(doc, kws[k], null, { nameOnly: true });
+          await sleep(500);
+        }
       }
-    }
-    for (var i = 0; i < 4; i++) {
-      var btns = Array.prototype.slice.call(doc.querySelectorAll('.npc-dialog-card button, .npc-choice-card button'));
-      // 优先「公会仓库」，其次任意「仓库」；选中后要点「确认」
-      var b = btns.filter(function (x) { return /公会仓库/.test(x.textContent) && !x.disabled; })[0]
-        || btns.filter(function (x) { return /仓库/.test(x.textContent) && !x.disabled; })[0];
-      if (b) {
-        b.click();
-        await sleep(500);
-        // 选完选项后按钮会重渲染，必须重新查「确认」，不能复用旧节点
-        var okb = Array.prototype.slice.call(doc.querySelectorAll('.npc-choice-card button, .npc-dialog-card button')).filter(function (x) {
-          return /^(确认|确定)$/.test(x.textContent.trim()) && !x.disabled;
-        })[0];
-        if (okb) okb.click();
-        await sleep(1200);
-        break;
+      if (!qSel('.npc-dialog-card')) continue;
+      // 选项列表比对话晚到，先等一会儿
+      for (var wait = 0; wait < 8 && !dialogButtons(doc).length; wait++) await sleep(250);
+      var b = dialogButtons(doc).filter(function (x) { return wants[w].test(x.textContent) && !x.disabled; })[0];
+      if (!b) {
+        if (qSel('.npc-dialog-card')) { await closeDialog(); await sleep(300); }
+        continue;
       }
-      var nx = btns.filter(function (x) { return /下一步|继续|确定|领取/.test(x.textContent) && !x.disabled; })[0];
-      if (!nx) break;
-      nx.click();
-      await sleep(900);
+      b.click();
+      await sleep(600);
+      // 选完选项后按钮会重渲染，必须重新查「确认」，不能复用旧节点
+      var okb = dialogButtons(doc).filter(function (x) {
+        return /^(确认|确定)$/.test(x.textContent.trim()) && !x.disabled;
+      })[0];
+      if (okb) okb.click();
+      // 公会仓库失败时服务端静默关对话、不返回仓库；个人仓库同理，都要轮询着看
+      if (await waitFor(function () { return qSel('.storage-card'); }, 6000, 200)) return true;
+      if (qSel('.npc-dialog-card')) { await closeDialog(); await sleep(300); }
     }
-    return !!(await waitFor(function () { return qSel('.storage-card'); }, 4000, 150));
+    return false;
   }
 
   async function closeStorageWindow(doc) {
@@ -4049,18 +4166,23 @@
       var t = '';
       try { t = advise(scoreRecord(r)).t; } catch (e) { return; }
       if (t !== '建议留') return;                        // 建议卖的已在 huntSellGear 处理
+      if (isWornWeapon(r.name)) return;                  // 正在穿/上次穿在手上的武器、盾不能存
       if (names.indexOf(r.name) < 0) names.push(r.name);
     });
     return names;
   }
 
-  // 背包里的战利品：消耗品/其他/卡片里，除保留名单（翅膀、双补药、放大镜）外的全部
+  // 背包里的战利品：除「装备 / 收藏」外的所有分类（消耗品、其他、卡片、材料…）全部收集，
+  // 只跳过保留名单（翅膀、双补药、放大镜）和未鉴定装备。铝这类重材料就在「其他」里
   async function bagLootNames(doc) {
     var out = [];
-    var tabs = ['消耗品', '其他', '卡片'];
-    for (var i = 0; i < tabs.length; i++) {
+    await ensureInvWindow(doc);
+    var labels = qAll('.inventory-tabs button').map(function (b) { return b.textContent.trim(); })
+      .filter(function (l) { return l && l !== '装备' && l !== '收藏' && l !== '全部'; });
+    if (!labels.length) labels = ['消耗品', '其他', '卡片'];
+    for (var i = 0; i < labels.length; i++) {
       await ensureInvWindow(doc);
-      if (!(await invTab(doc, tabs[i]))) continue;
+      if (!(await invTab(doc, labels[i]))) continue;
       qAll('.inventory-cell').forEach(function (c) {
         var nm = invItemName(c);
         if (!nm || /未鉴定/.test(nm) || stashKeepName(nm)) return;
@@ -4088,6 +4210,74 @@
     await closeStorageWindow(doc);
     if (qSel('.npc-dialog-card')) await closeDialog();
     return put.length;
+  }
+
+  // 背包（装备页）里按道具详情的「系列」找一把武器（只在完全没有武器记录时用，逐件点开详情）
+  async function findWeaponInBag(doc) {
+    await ensureInvWindow(doc);
+    await invTab(doc, '装备');
+    var weapons = /武器|短剑|长剑|双手剑|剑|匕首|拳刃|斧|钝器|锤|矛|枪|弓|拳套|乐器|琴|鞭|书|杖|镰|风魔|手里剑|榴弹|刀/;
+    var cells = qAll('.inventory-cell').filter(function (c) {
+      return !c.classList.contains('unidentified') && invItemName(c);
+    });
+    for (var i = 0; i < cells.length && i < 15; i++) {
+      var nm = invItemName(cells[i]);
+      var ic = cells[i].querySelector('.item-icon');
+      if (!ic || !nm) continue;
+      ic.click();
+      var det = await waitDetail(doc, nm);
+      if (!det) continue;
+      var ser = '';
+      try { ser = parseDetail(det).series || ''; } catch (e) {}
+      closeDetail(det);
+      await sleep(120);
+      if (ser && weapons.test(ser)) return nm;
+    }
+    return '';
+  }
+
+  // 出门前确认右手有武器：被卸下还没穿回时，从背包/公会仓库找回来；实在没有就停狩猎，别空手出门
+  async function ensureWeapon(doc) {
+    if (!qSel('.equipment-slot')) return '';
+    var cur = wornSlotName('右手');
+    if (cur === null || cur) return '';
+    if (Date.now() - (HUNT.weaponAt || 0) < 12000) return '正在补武器…';
+    HUNT.weaponAt = Date.now();
+
+    var want = wornSnap['右手'] || '';
+    await ensureInvWindow(doc);
+    await invTab(doc, '装备');
+    if (want && await wearFromBag(want) && wornSlotName('右手')) {
+      return '右手空着，已把「' + want + '」穿回';
+    }
+    // 连上次穿的名字都没有（刷新过页面）：按「系列」在背包里找一把武器
+    var found = want ? '' : await findWeaponInBag(doc);
+    if (found) {
+      await invTab(doc, '装备');
+      await wearFromBag(found);
+      if (wornSlotName('右手')) {
+        wornSnap['右手'] = found;
+        return '右手空着，已从背包穿上武器「' + found + '」';
+      }
+    }
+    // 背包里没有：试着从公会仓库取回上次那把
+    if (want && await openStorageWindow(doc)) {
+      var got = await withdrawNames(doc, [want]);
+      await closeStorageWindow(doc);
+      if (qSel('.npc-dialog-card')) await closeDialog();
+      if (got.length) {
+        await invTab(doc, '装备');
+        if (await wearFromBag(want) && wornSlotName('右手')) {
+          return '右手空着，已从仓库取回「' + want + '」穿上';
+        }
+      }
+    }
+    HUNT.on = false;
+    setHuntBtn(false);
+    HUNT.stopMsg = '右手没有武器（背包/公会仓库也找不到' + (want ? '「' + want + '」' : '上次的武器')
+      + '），已停止狩猎：请先手动装备武器再点「狩猎任务」';
+    try { localStorage.removeItem('ro-hunt-autoresume'); } catch (e) {}
+    return HUNT.stopMsg;
   }
 
   // 小号交完狩猎任务后：每天一次，把材料 + 评级 S 装备全存公会仓库
@@ -4184,7 +4374,10 @@
     var job = myJobBucket(doc);
     var sRecs = sRecords();
     var pending = [];
-    sRecs.forEach(function (r) { if (!r.stored && pending.indexOf(r.name) < 0) pending.push(r.name); });
+    sRecs.forEach(function (r) {
+      if (r.stored || isWornWeapon(r.name)) return;      // 手上/备用的武器、盾不存
+      if (pending.indexOf(r.name) < 0) pending.push(r.name);
+    });
     // 非 S 但判定「建议留」的装备也要存；消耗品/其他/卡片除保留名单外全存
     keepGearNames().forEach(function (n) { if (pending.indexOf(n) < 0) pending.push(n); });
     var loot = await bagLootNames(doc);
