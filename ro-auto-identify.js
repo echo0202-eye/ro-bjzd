@@ -1950,6 +1950,12 @@ function __RO_BOOT__() {
     var pos = mapInfo(doc);
     var tag = ' · ' + (pos.map || '?');
 
+    // 购买失败/提示类弹窗会拦住移动和换装：点掉再继续
+    if (clearNotice(doc)) {
+      await sleep(500);
+      return '已关闭游戏提示框' + tag;
+    }
+
     // 角色倒下：先点「返回城镇」复活，否则后面所有交互都会被拦
     var dead = Array.prototype.slice.call(doc.querySelectorAll('button')).filter(function (b) {
       return visible(b) && !b.disabled && /返回城镇/.test(b.textContent);
@@ -2194,6 +2200,8 @@ function __RO_BOOT__() {
 
   // 任务区 → 只留目标怪的排除列表 → 开始挂机
   async function huntFarm(doc, pos, targets, prog, tag) {
+    // 购买失败之类的游戏提示框会挡住移动/换装：先点掉，本 tick 直接返回，下一轮再走
+    if (clearNotice(doc)) return '已关闭游戏提示框' + tag;
     // 血量低且背包没药：先回城补给；在城里还补不上就别再出去送死
     // （有药时交给游戏挂机的自动喝药，不在这里反复回城）
     var ri = railInfo(doc);
@@ -3309,6 +3317,18 @@ function __RO_BOOT__() {
       return x.textContent.trim() === '关闭' && !x.disabled;
     })[0];
     if (cb) { cb.click(); await sleep(400); }
+  }
+
+  // 游戏的「购买失败 / 余额不足」等提示框（.service-notice-layer）会挡住移动和换装，
+  // 必须先点「确定」关掉，否则角色会一直原地打转
+  function clearNotice(doc) {
+    var n = doc.querySelector('.service-notice-layer');
+    if (!n) return false;
+    var b = Array.prototype.slice.call(n.querySelectorAll('button')).filter(function (x) {
+      return /确定|知道了|关闭|确认/.test(x.textContent);
+    })[0] || n.querySelector('button');
+    if (b && !b.disabled) b.click();
+    return true;
   }
 
   // 商店类对话没有关闭按钮，点空白也不会关；走开一步才会散场
