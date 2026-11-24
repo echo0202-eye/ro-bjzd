@@ -963,8 +963,10 @@ function __RO_BOOT__() {
     })[0] || null;
   }
 
-  async function casOpenNpc(doc, keyword, coord) {
+  async function casOpenNpc(doc, keyword, coord, opts) {
     var tgt = coord === undefined ? CAS_NPC : coord;
+    // nameOnly：名字对不上就放弃，不要按坐标兜底（否则会点到旁边不相干的 NPC）
+    if (opts && opts.nameOnly) tgt = null;
     var tab = entityTab(doc, 'NPC');
     if (tab && !tab.classList.contains('active')) { tab.click(); await sleep(400); }
     // 实体列表是异步拉的：最多等 3 秒，别读一次空列表就放弃
@@ -3943,7 +3945,7 @@ function __RO_BOOT__() {
       // 主城的 NPC 名可能是「仓库服务」「公会仓库」等，逐个试；点开可能直接弹仓库窗口
       var kws = ['仓库服务', '公会仓库', '仓库'];
       for (var k = 0; k < kws.length; k++) {
-        await casOpenNpc(doc, kws[k]);
+        await casOpenNpc(doc, kws[k], null, { nameOnly: true });
         await sleep(500);
         if (qSel('.storage-card')) return true;
         if (qSel('.npc-dialog-card')) break;
